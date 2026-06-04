@@ -24,6 +24,11 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: Create resources placeholder
+        run: |
+          New-Item -ItemType Directory -Force -Path src/resources
+          New-Item -ItemType File -Force -Path src/resources/.keep
+
       - name: Build EXE
         run: pyinstaller build.spec
 
