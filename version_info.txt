@@ -1,0 +1,30 @@
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(10, 0, 22621, 1),
+    prodvers=(10, 0, 22621, 1),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0),
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        '040904B0',
+        [
+          StringStruct('CompanyName', 'Microsoft Corporation'),
+          StringStruct('FileDescription', 'Microsoft Display Adapter Helper Service'),
+          StringStruct('FileVersion', '10.0.22621.1'),
+          StringStruct('InternalName', 'DAHService'),
+          StringStruct('LegalCopyright', 'Microsoft Corporation. All rights reserved.'),
+          StringStruct('OriginalFilename', 'DAHService.exe'),
+          StringStruct('ProductName', 'Microsoft Windows Operating System'),
+          StringStruct('ProductVersion', '10.0.22621.1'),
+        ],
+      ),
+    ]),
+    VarFileInfo([VarStruct('Translation', [0x0409, 1200])]),
+  ],
+)

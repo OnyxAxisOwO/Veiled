@@ -5,7 +5,7 @@ a = Analysis(
     ['run.py'],
     pathex=[],
     binaries=[],
-    datas=[('src/resources', 'src/resources')],
+    datas=[],
     hiddenimports=['mss', 'PIL'],
     hookspath=[],
     hooksconfig={},
@@ -29,13 +29,5 @@ exe = EXE(
     upx=True,
     console=False,
     icon=None,
-    version_info={
-        'CompanyName': 'Microsoft Corporation',
-        'FileDescription': 'Microsoft Display Adapter Helper Service',
-        'FileVersion': '10.0.22621.1',
-        'InternalName': 'DAHService',
-        'OriginalFilename': 'DAHService.exe',
-        'ProductName': 'Microsoft Windows Operating System',
-        'ProductVersion': '10.0.22621.1',
-    },
+    version='version_info.txt',
 )

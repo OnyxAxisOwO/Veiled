@@ -211,7 +211,8 @@ class VeiledApp(QObject):
             text = self._config.get("display.screenshot_success_text", "成功") or "成功"
             self._notification.show(text)
         prompt = self._config.get("prompts.screenshot", "")
-        self._send_to_ai("请分析这张截图", prompt, image_data=image_data, notify=True)
+        msg = self._config.get("prompts.screenshot_message", "请分析这张截图") or "请分析这张截图"
+        self._send_to_ai(msg, prompt, image_data=image_data, notify=True)
 
     def _on_screenshot_cancelled(self):
         self._screenshot_overlay = None
@@ -244,7 +245,8 @@ class VeiledApp(QObject):
             text = self._config.get("display.screenshot_success_text", "成功") or "成功"
             self._notification.show(text)
         prompt = self._config.get("prompts.screenshot", "")
-        self._send_to_ai("请分析这张截图", prompt, image_data=data, notify=True)
+        msg = self._config.get("prompts.screenshot_message", "请分析这张截图") or "请分析这张截图"
+        self._send_to_ai(msg, prompt, image_data=data, notify=True)
 
     def _ensure_conversation(self):
         if not self._current_conv_id:
@@ -343,9 +345,15 @@ class VeiledApp(QObject):
         self._current_worker = None
 
     def _on_ai_error(self, error: str):
+        # Roll back the failed user message so the next request starts from last clean state
+        if self._messages and self._messages[-1]["role"] == "user":
+            self._messages.pop()
+            if self._current_conv_id:
+                self._db.delete_last_message(self._current_conv_id)
         if self._chat_window:
             self._chat_window.finish_ai_message()
             self._chat_window.add_system_message(f"错误: {error}")
+        self._notification.show(f"错误: {error}")
         self._current_worker = None
 
     def _build_client(self) -> ApiClient:
@@ -356,6 +364,7 @@ class VeiledApp(QObject):
             model=c.api_model,
             endpoint=c.api_endpoint,
             proxy=c.get("api.proxy", ""),
+            extra_body=c.api_extra_body,
         )
 
     def _show_settings(self):

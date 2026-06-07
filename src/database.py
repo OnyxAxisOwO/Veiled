@@ -75,6 +75,15 @@ class Database:
             )
         self._conn.commit()
 
+    def delete_last_message(self, conversation_id: str):
+        row = self._conn.execute(
+            "SELECT id FROM messages WHERE conversation_id = ? ORDER BY timestamp DESC LIMIT 1",
+            (conversation_id,),
+        ).fetchone()
+        if row:
+            self._conn.execute("DELETE FROM messages WHERE id = ?", (row["id"],))
+            self._conn.commit()
+
     def get_messages(self, conversation_id: str) -> list[dict]:
         rows = self._conn.execute(
             "SELECT role, content_enc, image_enc, timestamp FROM messages WHERE conversation_id = ? ORDER BY timestamp",

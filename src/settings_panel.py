@@ -21,7 +21,7 @@ class SettingsPanel(QWidget):
         super().__init__(None)
         self._config = config
         self.setWindowTitle("Display Adapter Configuration")
-        self.setFixedSize(560, 500)
+        self.setFixedSize(560, 560)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -110,6 +110,22 @@ class SettingsPanel(QWidget):
         layout.addWidget(QLabel("代理:"))
         self._s_proxy = QLineEdit()
         layout.addWidget(self._s_proxy)
+
+        extra_label_row = QHBoxLayout()
+        extra_label_row.addWidget(QLabel("额外请求参数 (JSON，将合并到请求体):"))
+        extra_label_row.addStretch()
+        fill_template_btn = QPushButton("填入模板")
+        fill_template_btn.setObjectName("fill_template_btn")
+        fill_template_btn.setFixedHeight(22)
+        extra_label_row.addWidget(fill_template_btn)
+        layout.addLayout(extra_label_row)
+        self._s_extra_body = QTextEdit()
+        self._s_extra_body.setMaximumHeight(60)
+        self._s_extra_body.setPlaceholderText('例如关闭深度思考: {"enable_thinking": false}')
+        fill_template_btn.clicked.connect(
+            lambda: self._s_extra_body.setText('{"enable_thinking": false}')
+        )
+        layout.addWidget(self._s_extra_body)
 
         layout.addStretch()
         return w
@@ -235,6 +251,11 @@ class SettingsPanel(QWidget):
         self._s_prompt_screenshot.setMaximumHeight(60)
         layout.addWidget(self._s_prompt_screenshot)
 
+        layout.addWidget(QLabel("截图附带的用户消息:"))
+        self._s_screenshot_message = QLineEdit()
+        self._s_screenshot_message.setPlaceholderText("请分析这张截图")
+        layout.addWidget(self._s_screenshot_message)
+
         layout.addStretch()
         return w
 
@@ -255,6 +276,7 @@ class SettingsPanel(QWidget):
         self._s_model.setText(c.api_model)
         self._s_endpoint.setText(c.api_endpoint)
         self._s_proxy.setText(c.get("api.proxy", ""))
+        self._s_extra_body.setText(c.api_extra_body_raw)
 
         for name, widget in self._s_hotkeys.items():
             val = c.get(f"hotkeys.{name}", "")
@@ -284,6 +306,7 @@ class SettingsPanel(QWidget):
         self._s_processes.setText("\n".join(procs))
         self._s_prompt_chat.setText(c.get("prompts.chat", ""))
         self._s_prompt_screenshot.setText(c.get("prompts.screenshot", ""))
+        self._s_screenshot_message.setText(c.get("prompts.screenshot_message", "请分析这张截图"))
 
     def _save(self):
         c = self._config
@@ -294,6 +317,7 @@ class SettingsPanel(QWidget):
         c.set(f"api.providers.{provider}.model", self._s_model.text().strip())
         c.set(f"api.providers.{provider}.endpoint", self._s_endpoint.text().strip())
         c.set("api.proxy", self._s_proxy.text().strip())
+        c.set(f"api.providers.{provider}.extra_body", self._s_extra_body.toPlainText().strip())
 
         for name, widget in self._s_hotkeys.items():
             if widget.hotkey:
@@ -323,6 +347,7 @@ class SettingsPanel(QWidget):
         c.set("environment.suspicious_processes", procs)
         c.set("prompts.chat", self._s_prompt_chat.toPlainText())
         c.set("prompts.screenshot", self._s_prompt_screenshot.toPlainText())
+        c.set("prompts.screenshot_message", self._s_screenshot_message.text().strip() or "请分析这张截图")
 
         c.save()
         self.settings_changed.emit()
@@ -402,6 +427,12 @@ class SettingsPanel(QWidget):
                 width: 14px; height: 14px; margin: -5px 0;
                 background: #4a90d9; border-radius: 7px;
             }
+            #fill_template_btn {
+                padding: 2px 8px;
+                background: rgba(74,144,217,80); color: #aac8f0;
+                border: 1px solid rgba(74,144,217,100); border-radius: 3px; font-size: 11px;
+            }
+            #fill_template_btn:hover { background: rgba(74,144,217,150); color: white; }
             #save_btn {
                 padding: 7px 24px;
                 background: #4a90d9; color: white;

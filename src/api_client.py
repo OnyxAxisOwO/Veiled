@@ -36,12 +36,13 @@ class ApiClient:
     # DeepSeek 标准 chat 接口为纯文本，不接受 image_url 块。
     VISION_PROVIDERS = {"claude", "openai", "custom"}
 
-    def __init__(self, provider: str, api_key: str, model: str, endpoint: str, proxy: str = ""):
+    def __init__(self, provider: str, api_key: str, model: str, endpoint: str, proxy: str = "", extra_body: dict = None):
         self.provider = provider
         self.api_key = api_key
         self.model = model
         self.endpoint = endpoint.rstrip("/")
         self.proxy = proxy or None
+        self._extra_body = extra_body or {}
         self._input_tokens = 0
         self._output_tokens = 0
 
@@ -76,13 +77,16 @@ class ApiClient:
                 if m.get("content"):
                     content.append({"type": "text", "text": m["content"]})
                 api_messages.append({"role": m["role"], "content": content})
-            return {
+            body = {
                 "model": self.model,
                 "max_tokens": 4096,
                 "system": system_prompt,
                 "messages": api_messages,
                 "stream": True,
             }
+            if self._extra_body:
+                body.update(self._extra_body)
+            return body
         else:
             api_messages = [{"role": "system", "content": system_prompt}]
             for m in messages:
@@ -100,12 +104,15 @@ class ApiClient:
                 elif len(msg["content"]) == 1 and msg["content"][0]["type"] == "text":
                     msg["content"] = msg["content"][0]["text"]
                 api_messages.append(msg)
-            return {
+            body = {
                 "model": self.model,
                 "messages": api_messages,
                 "stream": True,
                 "stream_options": {"include_usage": True},  # OpenAI/DeepSeek: usage in final chunk
             }
+            if self._extra_body:
+                body.update(self._extra_body)
+            return body
 
     def _get_url(self) -> str:
         if self.provider == "claude":

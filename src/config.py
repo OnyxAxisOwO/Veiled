@@ -44,10 +44,10 @@ DEFAULT_CONFIG = {
     "api": {
         "provider": "claude",
         "providers": {
-            "claude": {"api_key": "", "model": "claude-sonnet-4-20250514", "endpoint": "https://api.anthropic.com"},
-            "openai": {"api_key": "", "model": "gpt-4o", "endpoint": "https://api.openai.com"},
-            "deepseek": {"api_key": "", "model": "deepseek-v4-pro", "endpoint": "https://api.deepseek.com"},
-            "custom": {"api_key": "", "model": "", "endpoint": ""},
+            "claude": {"api_key": "", "model": "claude-sonnet-4-20250514", "endpoint": "https://api.anthropic.com", "extra_body": ""},
+            "openai": {"api_key": "", "model": "gpt-4o", "endpoint": "https://api.openai.com", "extra_body": ""},
+            "deepseek": {"api_key": "", "model": "deepseek-v4-pro", "endpoint": "https://api.deepseek.com", "extra_body": ""},
+            "custom": {"api_key": "", "model": "", "endpoint": "", "extra_body": ""},
         },
         "proxy": "",
     },
@@ -90,6 +90,7 @@ DEFAULT_CONFIG = {
         "chat": "You are a helpful assistant. Be concise and direct.",
         "screenshot": "Look at this image and give the most concise answer possible. For multiple choice: just state the answer letter. For fill-in-the-blank: just give the answer. For code errors: give the key fix steps. For other content: one sentence summary.",
         "clipboard": "Process the following text. If it's in a foreign language, translate it. If it's a question, answer it. If it's content, summarize it. Be concise.",
+        "screenshot_message": "请分析这张截图",
     },
     "first_run": True,
 }
@@ -169,6 +170,22 @@ class Config:
     @property
     def provider(self) -> str:
         return self._data["api"]["provider"]
+
+    @property
+    def api_extra_body(self) -> dict:
+        provider = self._data["api"]["provider"]
+        raw = self._data["api"]["providers"].get(provider, {}).get("extra_body", "")
+        if not raw or not raw.strip():
+            return {}
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {}
+
+    @property
+    def api_extra_body_raw(self) -> str:
+        provider = self._data["api"]["provider"]
+        return self._data["api"]["providers"].get(provider, {}).get("extra_body", "")
 
     def _deep_merge(self, base: dict, override: dict):
         for k, v in override.items():
