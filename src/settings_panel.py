@@ -3,14 +3,28 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QComboBox, QCheckBox, QSlider, QTabWidget,
     QTextEdit, QFrame, QScrollArea, QListWidget, QListWidgetItem,
+    QFileDialog, QMessageBox,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QFont
 
-from .config import Config
-from .setup_wizard import HotkeyInput
+from .config import Config, PROVIDER_MAP, POSITION_MAP, DISGUISE_MAP
+from .widgets import HotkeyInput
+from .api_client import ApiClient
 
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
+
+
+class ModelFetchWorker(QThread):
+    done = pyqtSignal(list, str)
+
+    def __init__(self, client: ApiClient):
+        super().__init__()
+        self._client = client
+
+    def run(self):
+        models, error = self._client.list_models()
+        self.done.emit(models, error)
 
 
 class SettingsPanel(QWidget):
@@ -37,6 +51,7 @@ class SettingsPanel(QWidget):
         super().showEvent(event)
         hwnd = int(self.winId())
         ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
+        self._load_values()
 
     def closeEvent(self, event):
         # 拦截 Alt+F4：只隐藏，不销毁。
@@ -67,6 +82,7 @@ class SettingsPanel(QWidget):
 
         self._tabs = QTabWidget()
         self._tabs.addTab(self._create_connection_tab(), "连接")
+        self._tabs.addTab(self._create_vision_tab(), "视觉识别")
         self._tabs.addTab(self._create_hotkey_tab(), "快捷键")
         self._tabs.addTab(self._create_appearance_tab(), "外观")
         self._tabs.addTab(self._create_privacy_tab(), "隐私")
@@ -75,6 +91,14 @@ class SettingsPanel(QWidget):
         main_layout.addWidget(self._tabs, 1)
 
         btn_layout = QHBoxLayout()
+        export_btn = QPushButton("导出配置")
+        export_btn.setObjectName("io_btn")
+        export_btn.clicked.connect(self._export_config)
+        btn_layout.addWidget(export_btn)
+        import_btn = QPushButton("导入配置")
+        import_btn.setObjectName("io_btn")
+        import_btn.clicked.connect(self._import_config)
+        btn_layout.addWidget(import_btn)
         btn_layout.addStretch()
         save_btn = QPushButton("保存")
         save_btn.setObjectName("save_btn")
@@ -91,7 +115,7 @@ class SettingsPanel(QWidget):
 
         layout.addWidget(QLabel("服务商:"))
         self._s_provider = QComboBox()
-        self._s_provider.addItems(["Claude", "OpenAI", "DeepSeek", "自定义"])
+        self._s_provider.addItems(["OpenAI", "Claude", "自定义"])
         layout.addWidget(self._s_provider)
 
         layout.addWidget(QLabel("API Key:"))
@@ -99,9 +123,27 @@ class SettingsPanel(QWidget):
         self._s_api_key.setEchoMode(QLineEdit.EchoMode.Password)
         layout.addWidget(self._s_api_key)
 
-        layout.addWidget(QLabel("模型:"))
+        model_label_row = QHBoxLayout()
+        model_label_row.addWidget(QLabel("模型:"))
+        model_label_row.addStretch()
+        self._fetch_models_btn = QPushButton("获取列表")
+        self._fetch_models_btn.setObjectName("fill_template_btn")
+        self._fetch_models_btn.setFixedHeight(22)
+        self._fetch_models_btn.clicked.connect(self._fetch_models)
+        model_label_row.addWidget(self._fetch_models_btn)
+        layout.addLayout(model_label_row)
+
         self._s_model = QLineEdit()
         layout.addWidget(self._s_model)
+
+        self._fetch_status = QLabel("")
+        self._fetch_status.setVisible(False)
+        layout.addWidget(self._fetch_status)
+
+        self._model_list_combo = QComboBox()
+        self._model_list_combo.setVisible(False)
+        self._model_list_combo.textActivated.connect(self._s_model.setText)
+        layout.addWidget(self._model_list_combo)
 
         layout.addWidget(QLabel("Endpoint:"))
         self._s_endpoint = QLineEdit()
@@ -129,6 +171,80 @@ class SettingsPanel(QWidget):
 
         layout.addStretch()
         return w
+
+    # 视觉模型可选的服务商（须支持图片输入）
+    _VISION_PROVIDERS = {"OpenAI": "openai", "Claude": "claude", "自定义": "custom"}
+
+    def _create_vision_tab(self) -> QWidget:
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setSpacing(8)
+
+        self._s_vision_enabled = QCheckBox("启用视觉识别中继")
+        layout.addWidget(self._s_vision_enabled)
+
+        hint = QLabel("主模型不支持图片时，先用下面的视觉模型把截图转成文字，再交给主模型回答。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(hint)
+
+        prov_row = QHBoxLayout()
+        prov_row.addWidget(QLabel("视觉模型服务商:"))
+        prov_row.addStretch()
+        copy_btn = QPushButton("复用主连接")
+        copy_btn.setObjectName("fill_template_btn")
+        copy_btn.setFixedHeight(22)
+        copy_btn.clicked.connect(self._copy_main_to_vision)
+        prov_row.addWidget(copy_btn)
+        layout.addLayout(prov_row)
+        self._s_vision_provider = QComboBox()
+        self._s_vision_provider.addItems(list(self._VISION_PROVIDERS.keys()))
+        layout.addWidget(self._s_vision_provider)
+
+        layout.addWidget(QLabel("API Key:"))
+        self._s_vision_key = QLineEdit()
+        self._s_vision_key.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addWidget(self._s_vision_key)
+
+        layout.addWidget(QLabel("模型:"))
+        self._s_vision_model = QLineEdit()
+        self._s_vision_model.setPlaceholderText("claude-sonnet-4-20250514")
+        layout.addWidget(self._s_vision_model)
+
+        layout.addWidget(QLabel("Endpoint:"))
+        self._s_vision_endpoint = QLineEdit()
+        self._s_vision_endpoint.setPlaceholderText("https://api.anthropic.com")
+        layout.addWidget(self._s_vision_endpoint)
+
+        layout.addWidget(QLabel("额外请求参数 (JSON):"))
+        self._s_vision_extra = QTextEdit()
+        self._s_vision_extra.setMaximumHeight(48)
+        self._s_vision_extra.setPlaceholderText('{"enable_thinking": false}')
+        layout.addWidget(self._s_vision_extra)
+
+        layout.addWidget(QLabel("识别提示词（告诉视觉模型如何转写图片）:"))
+        self._s_vision_prompt = QTextEdit()
+        self._s_vision_prompt.setMaximumHeight(90)
+        layout.addWidget(self._s_vision_prompt)
+
+        layout.addStretch()
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(inner)
+        return scroll
+
+    def _copy_main_to_vision(self):
+        disp = self._s_provider.currentText()
+        if disp not in self._VISION_PROVIDERS:   # 主连接是不支持视觉的服务商时，回退到 OpenAI
+            self._s_vision_provider.setCurrentText("OpenAI")
+        else:
+            self._s_vision_provider.setCurrentText(disp)
+            self._s_vision_model.setText(self._s_model.text())
+        self._s_vision_key.setText(self._s_api_key.text())
+        self._s_vision_endpoint.setText(self._s_endpoint.text())
 
     def _create_hotkey_tab(self) -> QWidget:
         w = QWidget()
@@ -270,13 +386,22 @@ class SettingsPanel(QWidget):
 
     def _load_values(self):
         c = self._config
-        provider_map = {"claude": "Claude", "openai": "OpenAI", "deepseek": "DeepSeek", "custom": "自定义"}
-        self._s_provider.setCurrentText(provider_map.get(c.provider, "Claude"))
+        self._s_provider.setCurrentText(PROVIDER_MAP.get(c.provider, "Claude"))
         self._s_api_key.setText(c.api_key)
         self._s_model.setText(c.api_model)
         self._s_endpoint.setText(c.api_endpoint)
         self._s_proxy.setText(c.get("api.proxy", ""))
         self._s_extra_body.setText(c.api_extra_body_raw)
+
+        vp = c.get("api.vision.provider", "claude")
+        vp_disp = {v: k for k, v in self._VISION_PROVIDERS.items()}.get(vp, "Claude")
+        self._s_vision_enabled.setChecked(c.get("api.vision.enabled", False))
+        self._s_vision_provider.setCurrentText(vp_disp)
+        self._s_vision_key.setText(c.get("api.vision.api_key", ""))
+        self._s_vision_model.setText(c.get("api.vision.model", ""))
+        self._s_vision_endpoint.setText(c.get("api.vision.endpoint", ""))
+        self._s_vision_extra.setText(c.get("api.vision.extra_body", ""))
+        self._s_vision_prompt.setText(c.get("api.vision.prompt", ""))
 
         for name, widget in self._s_hotkeys.items():
             val = c.get(f"hotkeys.{name}", "")
@@ -284,13 +409,11 @@ class SettingsPanel(QWidget):
             widget._keys = val
 
         self._s_tray.setChecked(c.get("display.tray_icon", False))
-        pos_map = {"bottom_right": "右下角", "bottom_left": "左下角", "top_right": "右上角", "top_left": "左上角", "center": "居中"}
-        self._s_position.setCurrentText(pos_map.get(c.get("display.chat_position", "bottom_right"), "右下角"))
+        self._s_position.setCurrentText(POSITION_MAP.get(c.get("display.chat_position", "bottom_right"), "右下角"))
         opacity_val = int(c.get("display.chat_opacity", 0.9) * 100)
         self._s_opacity.setValue(opacity_val)
         self._s_opacity_label.setText(f"{opacity_val}%")
-        disguise_map = {"none": "无伪装", "qq": "QQ", "wechat": "微信", "edge": "浏览器 (Edge)"}
-        self._s_disguise.setCurrentText(disguise_map.get(c.get("display.notification_disguise", "none"), "无伪装"))
+        self._s_disguise.setCurrentText(DISGUISE_MAP.get(c.get("display.notification_disguise", "none"), "无伪装"))
         self._s_ss_toast.setChecked(c.get("display.screenshot_success_toast", True))
         self._s_ss_text.setText(c.get("display.screenshot_success_text", "成功"))
         self._s_theme.setCurrentText("深色" if c.get("display.theme", "dark") == "dark" else "浅色")
@@ -308,10 +431,17 @@ class SettingsPanel(QWidget):
         self._s_prompt_screenshot.setText(c.get("prompts.screenshot", ""))
         self._s_screenshot_message.setText(c.get("prompts.screenshot_message", "请分析这张截图"))
 
+        self._fetch_status.setVisible(False)
+        self._model_list_combo.setVisible(False)
+        self._fetch_models_btn.setEnabled(True)
+
     def _save(self):
         c = self._config
-        provider_map = {"Claude": "claude", "OpenAI": "openai", "DeepSeek": "deepseek", "自定义": "custom"}
-        provider = provider_map.get(self._s_provider.currentText(), "custom")
+        inv_provider = {v: k for k, v in PROVIDER_MAP.items()}
+        inv_position = {v: k for k, v in POSITION_MAP.items()}
+        inv_disguise = {v: k for k, v in DISGUISE_MAP.items()}
+
+        provider = inv_provider.get(self._s_provider.currentText(), "custom")
         c.set("api.provider", provider)
         c.set(f"api.providers.{provider}.api_key", self._s_api_key.text().strip())
         c.set(f"api.providers.{provider}.model", self._s_model.text().strip())
@@ -319,16 +449,22 @@ class SettingsPanel(QWidget):
         c.set("api.proxy", self._s_proxy.text().strip())
         c.set(f"api.providers.{provider}.extra_body", self._s_extra_body.toPlainText().strip())
 
+        c.set("api.vision.enabled", self._s_vision_enabled.isChecked())
+        c.set("api.vision.provider", self._VISION_PROVIDERS.get(self._s_vision_provider.currentText(), "claude"))
+        c.set("api.vision.api_key", self._s_vision_key.text().strip())
+        c.set("api.vision.model", self._s_vision_model.text().strip())
+        c.set("api.vision.endpoint", self._s_vision_endpoint.text().strip())
+        c.set("api.vision.extra_body", self._s_vision_extra.toPlainText().strip())
+        c.set("api.vision.prompt", self._s_vision_prompt.toPlainText())
+
         for name, widget in self._s_hotkeys.items():
             if widget.hotkey:
                 c.set(f"hotkeys.{name}", widget.hotkey)
 
         c.set("display.tray_icon", self._s_tray.isChecked())
-        pos_map = {"右下角": "bottom_right", "左下角": "bottom_left", "右上角": "top_right", "左上角": "top_left", "居中": "center"}
-        c.set("display.chat_position", pos_map.get(self._s_position.currentText(), "bottom_right"))
+        c.set("display.chat_position", inv_position.get(self._s_position.currentText(), "bottom_right"))
         c.set("display.chat_opacity", self._s_opacity.value() / 100.0)
-        disguise_map = {"无伪装": "none", "QQ": "qq", "微信": "wechat", "浏览器 (Edge)": "edge"}
-        c.set("display.notification_disguise", disguise_map.get(self._s_disguise.currentText(), "none"))
+        c.set("display.notification_disguise", inv_disguise.get(self._s_disguise.currentText(), "none"))
         c.set("display.screenshot_success_toast", self._s_ss_toast.isChecked())
         c.set("display.screenshot_success_text", self._s_ss_text.text().strip() or "成功")
         c.set("display.theme", "dark" if self._s_theme.currentText() == "深色" else "light")
@@ -352,6 +488,84 @@ class SettingsPanel(QWidget):
         c.save()
         self.settings_changed.emit()
         self._on_close()
+
+    def _export_config(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出配置", "adapter_config.json", "JSON 文件 (*.json)"
+        )
+        if not path:
+            return
+        try:
+            self._config.export_json(path)
+        except Exception as e:
+            QMessageBox.warning(self, "导出失败", str(e))
+            return
+        QMessageBox.information(
+            self, "导出成功",
+            f"已导出到：\n{path}\n\n"
+            "注意：文件为明文，包含 API Key，请妥善保管。\n"
+            "导出的是已保存的配置；界面上未点「保存」的改动不会包含在内。"
+        )
+
+    def _import_config(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "导入配置", "", "JSON 文件 (*.json)"
+        )
+        if not path:
+            return
+        confirm = QMessageBox.question(
+            self, "确认导入",
+            "导入将覆盖当前全部配置并立即保存，确定继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._config.import_json(path)
+        except Exception as e:
+            QMessageBox.warning(self, "导入失败", f"无法解析配置文件：\n{e}")
+            return
+        self._load_values()
+        self.settings_changed.emit()
+        QMessageBox.information(
+            self, "导入成功",
+            "配置已导入并保存。\n热键等部分设置可能需要重启应用后生效。"
+        )
+
+    def _fetch_models(self):
+        provider = {v: k for k, v in PROVIDER_MAP.items()}.get(self._s_provider.currentText(), "custom")
+        self._fetch_models_btn.setEnabled(False)
+        self._fetch_status.setText("获取中...")
+        self._fetch_status.setStyleSheet("color: #aaa; font-size: 11px;")
+        self._fetch_status.setVisible(True)
+        self._model_list_combo.setVisible(False)
+
+        client = ApiClient(
+            provider=provider,
+            api_key=self._s_api_key.text().strip(),
+            model="",
+            endpoint=self._s_endpoint.text().strip(),
+            proxy=self._s_proxy.text().strip(),
+        )
+        self._model_worker = ModelFetchWorker(client)
+        self._model_worker.done.connect(self._on_models_fetched)
+        self._model_worker.start()
+
+    def _on_models_fetched(self, models: list, error: str):
+        self._fetch_models_btn.setEnabled(True)
+        if error:
+            self._fetch_status.setText(f"✗ {error[:80]}")
+            self._fetch_status.setStyleSheet("color: #f44336; font-size: 11px;")
+        else:
+            self._fetch_status.setText(f"✓ {len(models)} 个模型，点击选择")
+            self._fetch_status.setStyleSheet("color: #4CAF50; font-size: 11px;")
+            self._model_list_combo.clear()
+            self._model_list_combo.addItems(models)
+            current = self._s_model.text().strip()
+            if current in models:
+                self._model_list_combo.setCurrentText(current)
+            self._model_list_combo.setVisible(True)
 
     def _on_close(self):
         self.hide()
@@ -439,6 +653,12 @@ class SettingsPanel(QWidget):
                 border: none; border-radius: 4px; font-size: 12px;
             }
             #save_btn:hover { background: #3a7bc8; }
+            #io_btn {
+                padding: 7px 14px;
+                background: rgba(70,70,70,200); color: #ccc;
+                border: 1px solid rgba(255,255,255,20); border-radius: 4px; font-size: 12px;
+            }
+            #io_btn:hover { background: rgba(90,90,90,230); color: #fff; }
             QComboBox QAbstractItemView {
                 background: #2d2d2d; color: #e0e0e0;
                 selection-background-color: #404040;

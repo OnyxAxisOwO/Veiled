@@ -5,61 +5,13 @@ from PyQt6.QtWidgets import (
     QFrame, QMessageBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont, QKeySequence
+from PyQt6.QtGui import QFont
 
-from .config import Config
+from .config import Config, PROVIDER_MAP, POSITION_MAP, DISGUISE_MAP
+from .widgets import HotkeyInput
 from .api_client import ApiClient
 
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
-
-
-class HotkeyInput(QLineEdit):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setReadOnly(True)
-        self.setPlaceholderText("按下快捷键组合...")
-        self._keys = ""
-
-    def keyPressEvent(self, event):
-        parts = []
-        mods = event.modifiers()
-        if mods & Qt.KeyboardModifier.ControlModifier:
-            parts.append("ctrl")
-        if mods & Qt.KeyboardModifier.ShiftModifier:
-            parts.append("shift")
-        if mods & Qt.KeyboardModifier.AltModifier:
-            parts.append("alt")
-
-        key = event.key()
-        key_map = {
-            Qt.Key.Key_Space: "space", Qt.Key.Key_QuoteLeft: "`",
-            Qt.Key.Key_Tab: "tab", Qt.Key.Key_Return: "enter",
-            Qt.Key.Key_Escape: "escape",
-        }
-        ignore_keys = {
-            Qt.Key.Key_Control, Qt.Key.Key_Shift, Qt.Key.Key_Alt, Qt.Key.Key_Meta,
-        }
-        if key in ignore_keys:
-            return
-
-        key_name = key_map.get(key)
-        if not key_name:
-            if Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
-                key_name = chr(key).lower()
-            elif Qt.Key.Key_0 <= key <= Qt.Key.Key_9:
-                key_name = chr(key)
-            elif Qt.Key.Key_F1 <= key <= Qt.Key.Key_F12:
-                key_name = f"f{key - Qt.Key.Key_F1 + 1}"
-            else:
-                return
-
-        parts.append(key_name)
-        self._keys = "+".join(parts)
-        self.setText(self._keys)
-
-    @property
-    def hotkey(self) -> str:
-        return self._keys
 
 
 class SetupWizard(QWidget):
@@ -122,7 +74,7 @@ class SetupWizard(QWidget):
 
         layout.addWidget(QLabel("AI 服务商:"))
         self._provider_combo = QComboBox()
-        self._provider_combo.addItems(["Claude", "OpenAI", "DeepSeek", "自定义"])
+        self._provider_combo.addItems(["OpenAI", "Claude", "自定义"])
         self._provider_combo.currentTextChanged.connect(self._on_provider_changed)
         layout.addWidget(self._provider_combo)
 
@@ -153,12 +105,12 @@ class SetupWizard(QWidget):
 
         layout.addWidget(QLabel("模型:"))
         self._model_input = QLineEdit()
-        self._model_input.setText("claude-sonnet-4-20250514")
+        self._model_input.setText("gpt-4o")
         layout.addWidget(self._model_input)
 
         layout.addWidget(QLabel("API Endpoint:"))
         self._endpoint_input = QLineEdit()
-        self._endpoint_input.setText("https://api.anthropic.com")
+        self._endpoint_input.setText("https://api.openai.com")
         layout.addWidget(self._endpoint_input)
 
         layout.addWidget(QLabel("代理 (可选):"))
@@ -265,12 +217,10 @@ class SetupWizard(QWidget):
         return page
 
     def _on_provider_changed(self, text: str):
-        mapping = {"Claude": "claude", "OpenAI": "openai", "DeepSeek": "deepseek", "自定义": "custom"}
-        provider = mapping.get(text, "custom")
+        provider = {v: k for k, v in PROVIDER_MAP.items()}.get(text, "custom")
         defaults = {
-            "claude": ("claude-sonnet-4-20250514", "https://api.anthropic.com"),
             "openai": ("gpt-4o", "https://api.openai.com"),
-            "deepseek": ("deepseek-v4-pro", "https://api.deepseek.com"),
+            "claude": ("claude-sonnet-4-20250514", "https://api.anthropic.com"),
             "custom": ("", ""),
         }
         model, endpoint = defaults.get(provider, ("", ""))
@@ -278,8 +228,7 @@ class SetupWizard(QWidget):
         self._endpoint_input.setText(endpoint)
 
     def _test_connection(self):
-        provider_map = {"Claude": "claude", "OpenAI": "openai", "DeepSeek": "deepseek", "自定义": "custom"}
-        provider = provider_map.get(self._provider_combo.currentText(), "custom")
+        provider = {v: k for k, v in PROVIDER_MAP.items()}.get(self._provider_combo.currentText(), "custom")
         client = ApiClient(
             provider=provider,
             api_key=self._api_key_input.text().strip(),
@@ -336,8 +285,11 @@ class SetupWizard(QWidget):
         )
 
     def _save_and_finish(self):
-        provider_map = {"Claude": "claude", "OpenAI": "openai", "DeepSeek": "deepseek", "自定义": "custom"}
-        provider = provider_map.get(self._provider_combo.currentText(), "custom")
+        inv_provider = {v: k for k, v in PROVIDER_MAP.items()}
+        inv_position = {v: k for k, v in POSITION_MAP.items()}
+        inv_disguise = {v: k for k, v in DISGUISE_MAP.items()}
+
+        provider = inv_provider.get(self._provider_combo.currentText(), "custom")
         self._config.set("api.provider", provider)
         self._config.set(f"api.providers.{provider}.api_key", self._api_key_input.text().strip())
         self._config.set(f"api.providers.{provider}.model", self._model_input.text().strip())
@@ -349,13 +301,11 @@ class SetupWizard(QWidget):
                 self._config.set(f"hotkeys.{name}", widget.hotkey)
 
         self._config.set("display.tray_icon", self._tray_cb.isChecked())
-        pos_map = {"右下角": "bottom_right", "左下角": "bottom_left", "右上角": "top_right", "左上角": "top_left", "居中": "center"}
-        self._config.set("display.chat_position", pos_map.get(self._position_combo.currentText(), "bottom_right"))
+        self._config.set("display.chat_position", inv_position.get(self._position_combo.currentText(), "bottom_right"))
         self._config.set("display.chat_opacity", self._opacity_slider.value() / 100.0)
         self._config.set("display.screenshot_protection", self._screenshot_protect_cb.isChecked())
         self._config.set("display.auto_start", self._autostart_cb.isChecked())
-        disguise_map = {"无伪装": "none", "QQ": "qq", "微信": "wechat", "浏览器 (Edge)": "edge"}
-        self._config.set("display.notification_disguise", disguise_map.get(self._disguise_combo.currentText(), "none"))
+        self._config.set("display.notification_disguise", inv_disguise.get(self._disguise_combo.currentText(), "none"))
 
         self._config.set("first_run", False)
         self._config.save()

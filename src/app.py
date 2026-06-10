@@ -5,7 +5,7 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSlot
 
 from .config import Config
 from .database import Database
-from .api_client import ApiClient, ApiWorker
+from .api_client import ApiClient, ApiWorker, VisionPipelineWorker, embed_description
 from .hotkey import HotkeyManager
 from .chat_window import ChatWindow
 from .screenshot import ScreenshotOverlay
@@ -187,12 +187,12 @@ class VeiledApp(QObject):
             return
         if self._screenshot_overlay and self._screenshot_overlay.isVisible():
             return
-        if not self._build_client().supports_vision:
+        if not self._can_capture():
             self._show_chat()
             if self._chat_window:
                 self._chat_window.add_system_message(
                     f"当前模型（{self._config.api_model}）不支持图片输入。\n"
-                    f"截图问答请切换到 Claude、GPT-4o 等视觉模型。"
+                    f"截图问答请切换到 Claude、GPT-4o 等视觉模型，或在设置中开启视觉识别中继。"
                 )
             return
         self._screenshot_overlay = ScreenshotOverlay(
@@ -220,12 +220,12 @@ class VeiledApp(QObject):
     def _screenshot_full(self):
         if self._env_monitor.is_silent:
             return
-        if not self._build_client().supports_vision:
+        if not self._can_capture():
             self._show_chat()
             if self._chat_window:
                 self._chat_window.add_system_message(
                     f"当前模型（{self._config.api_model}）不支持图片输入。\n"
-                    f"整屏截图请切换到 Claude、GPT-4o 等视觉模型。"
+                    f"整屏截图请切换到 Claude、GPT-4o 等视觉模型，或在设置中开启视觉识别中继。"
                 )
             return
         # 若对话窗可见，先隐藏再延迟抓屏，避免把自己截进去。
@@ -271,10 +271,10 @@ class VeiledApp(QObject):
         ext = Path(path).suffix.lower()
         image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
         if ext in image_exts:
-            if not self._build_client().supports_vision:
+            if not self._can_capture():
                 self._ensure_chat_window().add_system_message(
                     f"当前模型（{self._config.api_model}）不支持图片输入。\n"
-                    f"请切换到 Claude、GPT-4o 等视觉模型。"
+                    f"请切换到 Claude、GPT-4o 等视觉模型，或在设置中开启视觉识别中继。"
                 )
                 return
             try:
@@ -310,7 +310,11 @@ class VeiledApp(QObject):
 
         self._ensure_chat_window().add_user_message(content, image_data)
 
-        self._send_to_ai_stream(system_prompt, notify=notify)
+        if image_data and self._vision_relay_enabled():
+            # 开了中继：截图一律先经视觉模型转文字，再交主模型回答（主模型可不支持图片）
+            self._send_image_pipeline(system_prompt, notify=notify)
+        else:
+            self._send_to_ai_stream(system_prompt, notify=notify)
 
     def _send_to_ai_stream(self, system_prompt: str, notify: bool = False):
         client = self._build_client()
@@ -325,6 +329,30 @@ class VeiledApp(QObject):
         self._current_worker.stats_ready.connect(self._on_ai_stats)
         self._current_worker.error.connect(self._on_ai_error)
         self._current_worker.start()
+
+    def _send_image_pipeline(self, llm_system_prompt: str, notify: bool = False):
+        vlm = self._build_vlm_client()
+        llm = self._build_client()
+        vlm_prompt = self._config.get("api.vision.prompt", "")
+        self._current_worker = VisionPipelineWorker(
+            vlm, llm, self._messages, llm_system_prompt, vlm_prompt
+        )
+        self._ensure_chat_window().start_ai_message()
+        self._notify_on_finish = notify
+        self._current_worker.vlm_done.connect(self._on_vlm_done)
+        self._current_worker.chunk_received.connect(self._on_ai_chunk)
+        self._current_worker.finished.connect(self._on_ai_finished)
+        self._current_worker.stats_ready.connect(self._on_ai_stats)
+        self._current_worker.error.connect(self._on_ai_error)
+        self._current_worker.start()
+
+    def _on_vlm_done(self, desc: str):
+        # 把识别结果固化进历史、丢掉图片字节，使后续轮次不带视觉的 LLM 仍记得图里的内容
+        for m in reversed(self._messages):
+            if m.get("image"):
+                m["content"] = embed_description(m.get("content", ""), desc)
+                m.pop("image", None)
+                break
 
     def _on_ai_chunk(self, text: str):
         if self._chat_window:
@@ -365,6 +393,34 @@ class VeiledApp(QObject):
             endpoint=c.api_endpoint,
             proxy=c.get("api.proxy", ""),
             extra_body=c.api_extra_body,
+        )
+
+    def _vision_relay_enabled(self) -> bool:
+        """主模型不支持视觉时，是否启用 VLM 中继（已开关且填了 key）。"""
+        return bool(
+            self._config.get("api.vision.enabled", False)
+            and self._config.get("api.vision.api_key", "").strip()
+        )
+
+    def _can_capture(self) -> bool:
+        """主模型能直接看图，或开了 VLM 中继，都允许截图。"""
+        return self._build_client().supports_vision or self._vision_relay_enabled()
+
+    def _build_vlm_client(self) -> ApiClient:
+        c = self._config
+        import json as _json
+        raw = c.get("api.vision.extra_body", "")
+        try:
+            extra = _json.loads(raw) if raw and raw.strip() else {}
+        except Exception:
+            extra = {}
+        return ApiClient(
+            provider=c.get("api.vision.provider", "claude"),
+            api_key=c.get("api.vision.api_key", ""),
+            model=c.get("api.vision.model", ""),
+            endpoint=c.get("api.vision.endpoint", ""),
+            proxy=c.get("api.proxy", ""),
+            extra_body=extra,
         )
 
     def _show_settings(self):
@@ -433,9 +489,8 @@ class VeiledApp(QObject):
 
     def _switch_model(self):
         models = {
-            "claude": ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
             "openai": ["gpt-4o", "gpt-4o-mini", "o1"],
-            "deepseek": ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"],
+            "claude": ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
         }
         available = models.get(self._config.provider, [])
         if self._chat_window and available:

@@ -40,16 +40,32 @@ def dpapi_decrypt(data: bytes) -> bytes:
     return decrypted
 
 
+PROVIDER_MAP = {"openai": "OpenAI", "claude": "Claude", "custom": "自定义"}
+POSITION_MAP = {"bottom_right": "右下角", "bottom_left": "左下角", "top_right": "右上角", "top_left": "左上角", "center": "居中"}
+DISGUISE_MAP = {"none": "无伪装", "qq": "QQ", "wechat": "微信", "edge": "浏览器 (Edge)"}
+
 DEFAULT_CONFIG = {
     "api": {
-        "provider": "claude",
+        "provider": "openai",
         "providers": {
-            "claude": {"api_key": "", "model": "claude-sonnet-4-20250514", "endpoint": "https://api.anthropic.com", "extra_body": ""},
             "openai": {"api_key": "", "model": "gpt-4o", "endpoint": "https://api.openai.com", "extra_body": ""},
-            "deepseek": {"api_key": "", "model": "deepseek-v4-pro", "endpoint": "https://api.deepseek.com", "extra_body": ""},
+            "claude": {"api_key": "", "model": "claude-sonnet-4-20250514", "endpoint": "https://api.anthropic.com", "extra_body": ""},
             "custom": {"api_key": "", "model": "", "endpoint": "", "extra_body": ""},
         },
         "proxy": "",
+        "vision": {
+            "enabled": False,
+            "provider": "openai",
+            "api_key": "",
+            "model": "gpt-4o",
+            "endpoint": "https://api.openai.com",
+            "extra_body": "",
+            "prompt": (
+                "你是一个视觉识别助手。请把图片中的全部信息完整、客观地转写成文字："
+                "包含题目、选项、代码、报错、表格、界面文字等所有可见内容，"
+                "保留原有结构和顺序，不要作答、不要总结、不要省略。"
+            ),
+        },
     },
     "hotkeys": {
         "toggle_chat": "ctrl+shift+space",
@@ -132,6 +148,21 @@ class Config:
         encrypted = dpapi_encrypt(raw)
         self._config_path.write_bytes(encrypted)
 
+    def export_json(self, path: str):
+        """把当前配置导出为明文 JSON（含 API Key，注意保管）。"""
+        raw = json.dumps(self._data, ensure_ascii=False, indent=2)
+        Path(path).write_text(raw, encoding="utf-8")
+
+    def import_json(self, path: str):
+        """从明文 JSON 导入配置：以默认配置为基底合并，缺失字段自动补全，随后加密保存。"""
+        loaded = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError("配置文件格式不正确：根节点应为 JSON 对象")
+        merged = json.loads(json.dumps(DEFAULT_CONFIG))  # 深拷贝默认配置作基底
+        self._deep_merge(merged, loaded)
+        self._data = merged
+        self.save()
+
     def get(self, dotpath: str, default=None):
         keys = dotpath.split(".")
         node = self._data
@@ -150,7 +181,6 @@ class Config:
                 node[k] = {}
             node = node[k]
         node[keys[-1]] = value
-        self.save()
 
     @property
     def api_key(self) -> str:
