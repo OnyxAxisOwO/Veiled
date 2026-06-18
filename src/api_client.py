@@ -110,28 +110,35 @@ class VisionPipelineWorker(QThread):
 
 
 class ApiClient:
-    # 这些 provider 会发送图片块；纯文本的 OpenAI 兼容接口请改用「视觉识别中继」。
-    VISION_PROVIDERS = {"claude", "openai", "custom"}
+    """单个模型的 HTTP 客户端。
 
-    def __init__(self, provider: str, api_key: str, model: str, endpoint: str, proxy: str = "", extra_body: dict = None):
-        self.provider = provider
+    kind  —— 接口协议，决定请求格式："claude"（Anthropic）或其余一律按
+             OpenAI 兼容协议处理。
+    supports_vision —— 该模型是否能直接接收图片输入。由调用方根据模型上的
+             vision 标记传入；不支持时图片会被忽略（应走视觉识别中继）。
+    """
+
+    def __init__(self, kind: str, api_key: str, model: str, endpoint: str,
+                 proxy: str = "", extra_body: dict = None, supports_vision: bool = False):
+        self.kind = kind or "openai"
         self.api_key = api_key
         self.model = model
-        self.endpoint = endpoint.rstrip("/")
+        self.endpoint = (endpoint or "").rstrip("/")
         self.proxy = proxy or None
         self._extra_body = extra_body or {}
+        self._supports_vision = bool(supports_vision)
         self._input_tokens = 0
         self._output_tokens = 0
 
     @property
     def supports_vision(self) -> bool:
-        return self.provider in self.VISION_PROVIDERS
+        return self._supports_vision
 
     def _build_headers(self) -> dict:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
         }
-        if self.provider == "claude":
+        if self.kind == "claude":
             headers["x-api-key"] = self.api_key
             headers["anthropic-version"] = "2023-06-01"
             headers["content-type"] = "application/json"
@@ -141,7 +148,7 @@ class ApiClient:
         return headers
 
     def _build_body(self, messages: list[dict], system_prompt: str) -> dict:
-        if self.provider == "claude":
+        if self.kind == "claude":
             api_messages = []
             for m in messages:
                 content = []
@@ -192,13 +199,13 @@ class ApiClient:
             return body
 
     def _get_url(self) -> str:
-        if self.provider == "claude":
+        if self.kind == "claude":
             return f"{self.endpoint}/v1/messages"
         else:
             return f"{self.endpoint}/v1/chat/completions"
 
     def _update_usage(self, obj: dict):
-        if self.provider == "claude":
+        if self.kind == "claude":
             if obj.get("type") == "message_start":
                 usage = obj.get("message", {}).get("usage", {})
                 self._input_tokens = usage.get("input_tokens", 0)
@@ -239,7 +246,7 @@ class ApiClient:
                         yield text
 
     def _extract_text(self, obj: dict) -> str:
-        if self.provider == "claude":
+        if self.kind == "claude":
             if obj.get("type") == "content_block_delta":
                 delta = obj.get("delta", {})
                 if delta.get("type") == "text_delta":
@@ -269,7 +276,7 @@ class ApiClient:
     def test_connection(self) -> tuple[bool, str]:
         try:
             headers = self._build_headers()
-            if self.provider == "claude":
+            if self.kind == "claude":
                 body = {
                     "model": self.model,
                     "max_tokens": 10,

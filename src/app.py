@@ -151,8 +151,12 @@ class VeiledApp(QObject):
         self._chat_window.file_sent.connect(self._on_file_sent)
         self._chat_window.close_requested.connect(self._hide_chat)
         self._chat_window.open_settings_requested.connect(self._show_settings)
-        self._chat_window.conversations_panel_opened.connect(self._on_conversations_panel_opened)
         self._chat_window.conversation_selected.connect(self._on_conversation_selected)
+        self._chat_window.model_changed.connect(self._on_model_changed)
+        self._chat_window.manage_providers_requested.connect(self._open_providers_settings)
+
+        provs, active_pid, active_mid = self._model_options()
+        self._chat_window.set_model_options(provs, active_pid, active_mid)
 
         for msg in self._messages:
             if msg["role"] == "user":
@@ -192,7 +196,7 @@ class VeiledApp(QObject):
             if self._chat_window:
                 self._chat_window.add_system_message(
                     f"当前模型（{self._config.api_model}）不支持图片输入。\n"
-                    f"截图问答请切换到 Claude、GPT-4o 等视觉模型，或在设置中开启视觉识别中继。"
+                    f"请点左上角模型名切换到带 👁 的视觉模型，或在设置中开启视觉识别中继。"
                 )
             return
         self._screenshot_overlay = ScreenshotOverlay(
@@ -225,7 +229,7 @@ class VeiledApp(QObject):
             if self._chat_window:
                 self._chat_window.add_system_message(
                     f"当前模型（{self._config.api_model}）不支持图片输入。\n"
-                    f"整屏截图请切换到 Claude、GPT-4o 等视觉模型，或在设置中开启视觉识别中继。"
+                    f"请点左上角模型名切换到带 👁 的视觉模型，或在设置中开启视觉识别中继。"
                 )
             return
         # 若对话窗可见，先隐藏再延迟抓屏，避免把自己截进去。
@@ -274,7 +278,7 @@ class VeiledApp(QObject):
             if not self._can_capture():
                 self._ensure_chat_window().add_system_message(
                     f"当前模型（{self._config.api_model}）不支持图片输入。\n"
-                    f"请切换到 Claude、GPT-4o 等视觉模型，或在设置中开启视觉识别中继。"
+                    f"请点左上角模型名切换到带 👁 的视觉模型，或在设置中开启视觉识别中继。"
                 )
                 return
             try:
@@ -333,7 +337,7 @@ class VeiledApp(QObject):
     def _send_image_pipeline(self, llm_system_prompt: str, notify: bool = False):
         vlm = self._build_vlm_client()
         llm = self._build_client()
-        vlm_prompt = self._config.get("api.vision.prompt", "")
+        vlm_prompt = self._config.get("api.vision_relay.prompt", "")
         self._current_worker = VisionPipelineWorker(
             vlm, llm, self._messages, llm_system_prompt, vlm_prompt
         )
@@ -387,41 +391,64 @@ class VeiledApp(QObject):
     def _build_client(self) -> ApiClient:
         c = self._config
         return ApiClient(
-            provider=c.provider,
+            kind=c.api_kind,
             api_key=c.api_key,
             model=c.api_model,
             endpoint=c.api_endpoint,
-            proxy=c.get("api.proxy", ""),
+            proxy=c.proxy,
             extra_body=c.api_extra_body,
+            supports_vision=c.active_model_supports_vision(),
         )
 
     def _vision_relay_enabled(self) -> bool:
-        """主模型不支持视觉时，是否启用 VLM 中继（已开关且填了 key）。"""
-        return bool(
-            self._config.get("api.vision.enabled", False)
-            and self._config.get("api.vision.api_key", "").strip()
-        )
+        """当前模型不支持视觉时，是否启用 VLM 中继（已开关且引用了有 key 的服务商）。"""
+        c = self._config
+        if not c.get("api.vision_relay.enabled", False):
+            return False
+        prov = c.get_provider(c.get("api.vision_relay.provider", ""))
+        model = (c.get("api.vision_relay.model", "") or "").strip()
+        return bool(prov and (prov.get("api_key", "") or "").strip() and model)
 
     def _can_capture(self) -> bool:
-        """主模型能直接看图，或开了 VLM 中继，都允许截图。"""
-        return self._build_client().supports_vision or self._vision_relay_enabled()
+        """当前模型能直接看图，或开了 VLM 中继，都允许截图。"""
+        return self._config.active_model_supports_vision() or self._vision_relay_enabled()
 
     def _build_vlm_client(self) -> ApiClient:
+        from .config import parse_extra_body
         c = self._config
-        import json as _json
-        raw = c.get("api.vision.extra_body", "")
-        try:
-            extra = _json.loads(raw) if raw and raw.strip() else {}
-        except Exception:
-            extra = {}
+        prov = c.get_provider(c.get("api.vision_relay.provider", "")) or {}
         return ApiClient(
-            provider=c.get("api.vision.provider", "claude"),
-            api_key=c.get("api.vision.api_key", ""),
-            model=c.get("api.vision.model", ""),
-            endpoint=c.get("api.vision.endpoint", ""),
-            proxy=c.get("api.proxy", ""),
-            extra_body=extra,
+            kind=prov.get("kind", "openai"),
+            api_key=prov.get("api_key", ""),
+            model=c.get("api.vision_relay.model", ""),
+            endpoint=prov.get("endpoint", ""),
+            proxy=c.proxy,
+            extra_body=parse_extra_body(prov.get("extra_body", "")),
+            supports_vision=True,   # 中继模型必须能接收图片
         )
+
+    def _model_options(self):
+        """提供给对话窗模型切换芯片的数据。"""
+        provs = []
+        for p in self._config.providers():
+            provs.append({
+                "id": p.get("id"),
+                "name": p.get("name") or p.get("id"),
+                "models": [
+                    {"id": m.get("id"), "name": m.get("name") or m.get("id"), "vision": bool(m.get("vision"))}
+                    for m in p.get("models", []) if m.get("id")
+                ],
+            })
+        return provs, self._config.get("api.active.provider", ""), self._config.get("api.active.model", "")
+
+    def _on_model_changed(self, provider_id: str, model_id: str):
+        self._config.set_active(provider_id, model_id)
+        self._config.save()
+
+    def _open_providers_settings(self):
+        self._show_settings()
+        if self._settings_panel:
+            self._settings_panel.open_providers_page()
 
     def _show_settings(self):
         if not self._settings_panel:
@@ -461,12 +488,17 @@ class VeiledApp(QObject):
             return
         messages = self._db.get_messages(conv_id)
         self._current_conv_id = conv_id
-        self._messages = [{"role": m["role"], "content": m["content"]} for m in messages]
+        # 保留图片字节：既用于重新渲染图片气泡，也让重开的视觉对话在追问时仍带上原图
+        self._messages = [
+            {"role": m["role"], "content": m["content"],
+             **({"image": m["image"]} if m.get("image") else {})}
+            for m in messages
+        ]
         if self._chat_window:
             self._chat_window.clear_messages()
             for msg in self._messages:
                 if msg["role"] == "user":
-                    self._chat_window.add_user_message(msg["content"])
+                    self._chat_window.add_user_message(msg["content"], msg.get("image"))
                 elif msg["role"] == "assistant":
                     self._chat_window.add_ai_message(msg["content"])
 
@@ -488,17 +520,17 @@ class VeiledApp(QObject):
                 self._chat_window.add_system_message("对话已删除")
 
     def _switch_model(self):
-        models = {
-            "openai": ["gpt-4o", "gpt-4o-mini", "o1"],
-            "claude": ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-haiku-4-5-20251001"],
-        }
-        available = models.get(self._config.provider, [])
-        if self._chat_window and available:
-            lines = [f"当前: {self._config.api_model}", "可用模型:"]
-            for m in available:
-                lines.append(f"  - {m}")
-            lines.append("请在设置中切换模型")
-            self._chat_window.add_system_message("\n".join(lines))
+        if not self._chat_window:
+            return
+        m = self._config.active_model()
+        prov = self._config.active_provider()
+        name = (m.get("name") or m.get("id")) if m else "(未设置)"
+        prov_name = (prov.get("name") if prov else "") or ""
+        self._chat_window.add_system_message(
+            f"当前模型：{prov_name} · {name}\n"
+            "点左上角的模型名即可切换服务商 / 模型；\n"
+            "在「设置 → 服务商与模型」可新增服务商、获取模型列表、标记视觉模型。"
+        )
 
     def _translate(self, text: str):
         if not text:

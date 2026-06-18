@@ -7,9 +7,16 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont
 
-from .config import Config, PROVIDER_MAP, POSITION_MAP, DISGUISE_MAP
+from .config import Config, POSITION_MAP, DISGUISE_MAP, new_provider_id, model_guess_vision
 from .widgets import HotkeyInput
 from .api_client import ApiClient
+
+# 预设：展示名 → (kind, 默认模型, 默认 endpoint)
+_PRESETS = {
+    "OpenAI": ("openai", "gpt-4o", "https://api.openai.com"),
+    "Claude": ("claude", "claude-sonnet-4-20250514", "https://api.anthropic.com"),
+    "自定义 (OpenAI 兼容)": ("openai", "", ""),
+}
 
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
@@ -72,11 +79,16 @@ class SetupWizard(QWidget):
         layout = QVBoxLayout(page)
         layout.setSpacing(12)
 
-        layout.addWidget(QLabel("AI 服务商:"))
+        layout.addWidget(QLabel("AI 服务商预设:"))
         self._provider_combo = QComboBox()
-        self._provider_combo.addItems(["OpenAI", "Claude", "自定义"])
+        self._provider_combo.addItems(list(_PRESETS.keys()))
         self._provider_combo.currentTextChanged.connect(self._on_provider_changed)
         layout.addWidget(self._provider_combo)
+
+        layout.addWidget(QLabel("服务商名称:"))
+        self._name_input = QLineEdit()
+        self._name_input.setText("OpenAI")
+        layout.addWidget(self._name_input)
 
         layout.addWidget(QLabel("API Key:"))
         self._api_key_input = QLineEdit()
@@ -217,20 +229,15 @@ class SetupWizard(QWidget):
         return page
 
     def _on_provider_changed(self, text: str):
-        provider = {v: k for k, v in PROVIDER_MAP.items()}.get(text, "custom")
-        defaults = {
-            "openai": ("gpt-4o", "https://api.openai.com"),
-            "claude": ("claude-sonnet-4-20250514", "https://api.anthropic.com"),
-            "custom": ("", ""),
-        }
-        model, endpoint = defaults.get(provider, ("", ""))
+        kind, model, endpoint = _PRESETS.get(text, ("openai", "", ""))
+        self._name_input.setText("自定义" if text.startswith("自定义") else text)
         self._model_input.setText(model)
         self._endpoint_input.setText(endpoint)
 
     def _test_connection(self):
-        provider = {v: k for k, v in PROVIDER_MAP.items()}.get(self._provider_combo.currentText(), "custom")
+        kind, _m, _e = _PRESETS.get(self._provider_combo.currentText(), ("openai", "", ""))
         client = ApiClient(
-            provider=provider,
+            kind=kind,
             api_key=self._api_key_input.text().strip(),
             model=self._model_input.text().strip(),
             endpoint=self._endpoint_input.text().strip(),
@@ -285,15 +292,26 @@ class SetupWizard(QWidget):
         )
 
     def _save_and_finish(self):
-        inv_provider = {v: k for k, v in PROVIDER_MAP.items()}
         inv_position = {v: k for k, v in POSITION_MAP.items()}
         inv_disguise = {v: k for k, v in DISGUISE_MAP.items()}
 
-        provider = inv_provider.get(self._provider_combo.currentText(), "custom")
-        self._config.set("api.provider", provider)
-        self._config.set(f"api.providers.{provider}.api_key", self._api_key_input.text().strip())
-        self._config.set(f"api.providers.{provider}.model", self._model_input.text().strip())
-        self._config.set(f"api.providers.{provider}.endpoint", self._endpoint_input.text().strip())
+        kind, _m, _e = _PRESETS.get(self._provider_combo.currentText(), ("openai", "", ""))
+        pid = new_provider_id()
+        model_id = self._model_input.text().strip()
+        models = []
+        if model_id:
+            models.append({"id": model_id, "name": model_id, "vision": model_guess_vision(model_id)})
+        provider = {
+            "id": pid,
+            "name": self._name_input.text().strip() or self._provider_combo.currentText(),
+            "kind": kind,
+            "endpoint": self._endpoint_input.text().strip(),
+            "api_key": self._api_key_input.text().strip(),
+            "extra_body": "",
+            "models": models,
+        }
+        self._config.set("api.providers", [provider])
+        self._config.set("api.active", {"provider": pid, "model": model_id})
         self._config.set("api.proxy", self._proxy_input.text().strip())
 
         for name, widget in self._hotkey_inputs.items():

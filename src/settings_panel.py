@@ -1,18 +1,24 @@
 import ctypes
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QComboBox, QCheckBox, QSlider, QTabWidget,
+    QLineEdit, QComboBox, QCheckBox, QSlider, QStackedWidget,
     QTextEdit, QFrame, QScrollArea, QListWidget, QListWidgetItem,
     QFileDialog, QMessageBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QFont
 
-from .config import Config, PROVIDER_MAP, POSITION_MAP, DISGUISE_MAP
+from .config import (
+    Config, KIND_MAP, POSITION_MAP, DISGUISE_MAP,
+    model_guess_vision, new_provider_id, DEFAULT_VISION_PROMPT,
+)
 from .widgets import HotkeyInput
 from .api_client import ApiClient
 
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
+
+# 协议下拉框：展示名 → kind
+_KINDS = [("OpenAI 兼容", "openai"), ("Claude (Anthropic)", "claude")]
 
 
 class ModelFetchWorker(QThread):
@@ -35,7 +41,7 @@ class SettingsPanel(QWidget):
         super().__init__(None)
         self._config = config
         self.setWindowTitle("Display Adapter Configuration")
-        self.setFixedSize(560, 560)
+        self.setFixedSize(800, 600)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -43,6 +49,15 @@ class SettingsPanel(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._drag_pos = None
+
+        # 服务商工作副本（保存时才写回 config）
+        self._providers: list[dict] = []
+        self._cur_prov_index = -1
+        self._cur_model_index = -1
+        self._active_pid = ""
+        self._active_mid = ""
+        self._loading = False
+
         self._setup_ui()
         self._load_values()
         self._apply_style()
@@ -54,9 +69,10 @@ class SettingsPanel(QWidget):
         self._load_values()
 
     def closeEvent(self, event):
-        # 拦截 Alt+F4：只隐藏，不销毁。
         event.ignore()
         self._on_close()
+
+    # ── 整体布局：侧边栏 + 堆叠页 ─────────────────────────────────────────────
 
     def _setup_ui(self):
         outer = QVBoxLayout(self)
@@ -64,171 +80,78 @@ class SettingsPanel(QWidget):
 
         container = QFrame()
         container.setObjectName("settings_container")
-        main_layout = QVBoxLayout(container)
-        main_layout.setContentsMargins(16, 12, 16, 12)
+        root = QVBoxLayout(container)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        title_bar = QHBoxLayout()
+        # 标题栏
+        title_bar = QFrame()
+        title_bar.setObjectName("settings_titlebar")
+        title_bar.setFixedHeight(46)
+        tb = QHBoxLayout(title_bar)
+        tb.setContentsMargins(18, 0, 8, 0)
         title = QLabel("设置")
         title.setFont(QFont("Microsoft YaHei", 13, QFont.Weight.Bold))
         title.setObjectName("settings_title")
-        title_bar.addWidget(title)
-        title_bar.addStretch()
+        tb.addWidget(title)
+        tb.addStretch()
         close_btn = QPushButton("×")
         close_btn.setObjectName("close_btn")
-        close_btn.setFixedSize(28, 28)
+        close_btn.setFixedSize(30, 30)
         close_btn.clicked.connect(self._on_close)
-        title_bar.addWidget(close_btn)
-        main_layout.addLayout(title_bar)
+        tb.addWidget(close_btn)
+        root.addWidget(title_bar)
 
-        self._tabs = QTabWidget()
-        self._tabs.addTab(self._create_connection_tab(), "连接")
-        self._tabs.addTab(self._create_vision_tab(), "视觉识别")
-        self._tabs.addTab(self._create_hotkey_tab(), "快捷键")
-        self._tabs.addTab(self._create_appearance_tab(), "外观")
-        self._tabs.addTab(self._create_privacy_tab(), "隐私")
-        self._tabs.addTab(self._create_behavior_tab(), "行为")
-        self._tabs.addTab(self._create_about_tab(), "关于")
-        main_layout.addWidget(self._tabs, 1)
+        # 主体：侧边栏 | 内容
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(0)
 
-        btn_layout = QHBoxLayout()
+        self._nav = QListWidget()
+        self._nav.setObjectName("nav_list")
+        self._nav.setFixedWidth(168)
+        for label in ["服务商与模型", "视觉识别", "快捷键", "外观", "隐私", "行为", "关于"]:
+            QListWidgetItem(label, self._nav)
+        self._nav.currentRowChanged.connect(self._on_nav_changed)
+        body.addWidget(self._nav)
+
+        self._pages = QStackedWidget()
+        self._pages.setObjectName("pages")
+        self._pages.addWidget(self._create_providers_page())
+        self._pages.addWidget(self._create_vision_page())
+        self._pages.addWidget(self._create_hotkey_page())
+        self._pages.addWidget(self._create_appearance_page())
+        self._pages.addWidget(self._create_privacy_page())
+        self._pages.addWidget(self._create_behavior_page())
+        self._pages.addWidget(self._create_about_page())
+        body.addWidget(self._pages, 1)
+        root.addLayout(body, 1)
+
+        # 底部按钮条
+        footer = QFrame()
+        footer.setObjectName("settings_footer")
+        footer.setFixedHeight(56)
+        fb = QHBoxLayout(footer)
+        fb.setContentsMargins(16, 0, 16, 0)
         export_btn = QPushButton("导出配置")
         export_btn.setObjectName("io_btn")
         export_btn.clicked.connect(self._export_config)
-        btn_layout.addWidget(export_btn)
+        fb.addWidget(export_btn)
         import_btn = QPushButton("导入配置")
         import_btn.setObjectName("io_btn")
         import_btn.clicked.connect(self._import_config)
-        btn_layout.addWidget(import_btn)
-        btn_layout.addStretch()
+        fb.addWidget(import_btn)
+        fb.addStretch()
         save_btn = QPushButton("保存")
         save_btn.setObjectName("save_btn")
         save_btn.clicked.connect(self._save)
-        btn_layout.addWidget(save_btn)
-        main_layout.addLayout(btn_layout)
+        fb.addWidget(save_btn)
+        root.addWidget(footer)
 
         outer.addWidget(container)
+        self._nav.setCurrentRow(0)
 
-    def _create_connection_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setSpacing(8)
-
-        layout.addWidget(QLabel("服务商:"))
-        self._s_provider = QComboBox()
-        self._s_provider.addItems(["OpenAI", "Claude", "自定义"])
-        layout.addWidget(self._s_provider)
-
-        layout.addWidget(QLabel("API Key:"))
-        self._s_api_key = QLineEdit()
-        self._s_api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        layout.addWidget(self._s_api_key)
-
-        model_label_row = QHBoxLayout()
-        model_label_row.addWidget(QLabel("模型:"))
-        model_label_row.addStretch()
-        self._fetch_models_btn = QPushButton("获取列表")
-        self._fetch_models_btn.setObjectName("fill_template_btn")
-        self._fetch_models_btn.setFixedHeight(22)
-        self._fetch_models_btn.clicked.connect(self._fetch_models)
-        model_label_row.addWidget(self._fetch_models_btn)
-        layout.addLayout(model_label_row)
-
-        self._s_model = QLineEdit()
-        layout.addWidget(self._s_model)
-
-        self._fetch_status = QLabel("")
-        self._fetch_status.setVisible(False)
-        layout.addWidget(self._fetch_status)
-
-        self._model_list_combo = QComboBox()
-        self._model_list_combo.setVisible(False)
-        self._model_list_combo.textActivated.connect(self._s_model.setText)
-        layout.addWidget(self._model_list_combo)
-
-        layout.addWidget(QLabel("Endpoint:"))
-        self._s_endpoint = QLineEdit()
-        layout.addWidget(self._s_endpoint)
-
-        layout.addWidget(QLabel("代理:"))
-        self._s_proxy = QLineEdit()
-        layout.addWidget(self._s_proxy)
-
-        extra_label_row = QHBoxLayout()
-        extra_label_row.addWidget(QLabel("额外请求参数 (JSON，将合并到请求体):"))
-        extra_label_row.addStretch()
-        fill_template_btn = QPushButton("填入模板")
-        fill_template_btn.setObjectName("fill_template_btn")
-        fill_template_btn.setFixedHeight(22)
-        extra_label_row.addWidget(fill_template_btn)
-        layout.addLayout(extra_label_row)
-        self._s_extra_body = QTextEdit()
-        self._s_extra_body.setMaximumHeight(60)
-        self._s_extra_body.setPlaceholderText('例如关闭深度思考: {"enable_thinking": false}')
-        fill_template_btn.clicked.connect(
-            lambda: self._s_extra_body.setText('{"enable_thinking": false}')
-        )
-        layout.addWidget(self._s_extra_body)
-
-        layout.addStretch()
-        return w
-
-    # 视觉模型可选的服务商（须支持图片输入）
-    _VISION_PROVIDERS = {"OpenAI": "openai", "Claude": "claude", "自定义": "custom"}
-
-    def _create_vision_tab(self) -> QWidget:
-        inner = QWidget()
-        layout = QVBoxLayout(inner)
-        layout.setSpacing(8)
-
-        self._s_vision_enabled = QCheckBox("启用视觉识别中继")
-        layout.addWidget(self._s_vision_enabled)
-
-        hint = QLabel("主模型不支持图片时，先用下面的视觉模型把截图转成文字，再交给主模型回答。")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: #888; font-size: 11px;")
-        layout.addWidget(hint)
-
-        prov_row = QHBoxLayout()
-        prov_row.addWidget(QLabel("视觉模型服务商:"))
-        prov_row.addStretch()
-        copy_btn = QPushButton("复用主连接")
-        copy_btn.setObjectName("fill_template_btn")
-        copy_btn.setFixedHeight(22)
-        copy_btn.clicked.connect(self._copy_main_to_vision)
-        prov_row.addWidget(copy_btn)
-        layout.addLayout(prov_row)
-        self._s_vision_provider = QComboBox()
-        self._s_vision_provider.addItems(list(self._VISION_PROVIDERS.keys()))
-        layout.addWidget(self._s_vision_provider)
-
-        layout.addWidget(QLabel("API Key:"))
-        self._s_vision_key = QLineEdit()
-        self._s_vision_key.setEchoMode(QLineEdit.EchoMode.Password)
-        layout.addWidget(self._s_vision_key)
-
-        layout.addWidget(QLabel("模型:"))
-        self._s_vision_model = QLineEdit()
-        self._s_vision_model.setPlaceholderText("claude-sonnet-4-20250514")
-        layout.addWidget(self._s_vision_model)
-
-        layout.addWidget(QLabel("Endpoint:"))
-        self._s_vision_endpoint = QLineEdit()
-        self._s_vision_endpoint.setPlaceholderText("https://api.anthropic.com")
-        layout.addWidget(self._s_vision_endpoint)
-
-        layout.addWidget(QLabel("额外请求参数 (JSON):"))
-        self._s_vision_extra = QTextEdit()
-        self._s_vision_extra.setMaximumHeight(48)
-        self._s_vision_extra.setPlaceholderText('{"enable_thinking": false}')
-        layout.addWidget(self._s_vision_extra)
-
-        layout.addWidget(QLabel("识别提示词（告诉视觉模型如何转写图片）:"))
-        self._s_vision_prompt = QTextEdit()
-        self._s_vision_prompt.setMaximumHeight(90)
-        layout.addWidget(self._s_vision_prompt)
-
-        layout.addStretch()
-
+    def _scrollable(self, inner: QWidget) -> QScrollArea:
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -236,20 +159,509 @@ class SettingsPanel(QWidget):
         scroll.setWidget(inner)
         return scroll
 
-    def _copy_main_to_vision(self):
-        disp = self._s_provider.currentText()
-        if disp not in self._VISION_PROVIDERS:   # 主连接是不支持视觉的服务商时，回退到 OpenAI
-            self._s_vision_provider.setCurrentText("OpenAI")
-        else:
-            self._s_vision_provider.setCurrentText(disp)
-            self._s_vision_model.setText(self._s_model.text())
-        self._s_vision_key.setText(self._s_api_key.text())
-        self._s_vision_endpoint.setText(self._s_endpoint.text())
+    def _on_nav_changed(self, row: int):
+        self._pages.setCurrentIndex(row)
+        if row == 1:  # 进入视觉识别页时，用最新的服务商列表刷新下拉框
+            self._commit_model_form()
+            self._commit_provider_form()
+            self._refresh_relay_provider_combo()
 
-    def _create_hotkey_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setSpacing(8)
+    # ── 页 1：服务商与模型 ───────────────────────────────────────────────────
+
+    def _create_providers_page(self) -> QWidget:
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+
+        hint = QLabel("可创建任意多个服务商，每个服务商有独立的接口地址、密钥与模型列表。")
+        hint.setObjectName("page_hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        cols = QHBoxLayout()
+        cols.setSpacing(14)
+
+        # 左：服务商列表
+        left = QVBoxLayout()
+        left.setSpacing(6)
+        left.addWidget(QLabel("服务商"))
+        self._prov_list = QListWidget()
+        self._prov_list.setObjectName("sub_list")
+        self._prov_list.setFixedWidth(190)
+        self._prov_list.currentRowChanged.connect(self._on_provider_selected)
+        left.addWidget(self._prov_list, 1)
+        prov_btns = QHBoxLayout()
+        add_p = QPushButton("＋ 新增")
+        add_p.setObjectName("mini_btn")
+        add_p.clicked.connect(self._add_provider)
+        del_p = QPushButton("－ 删除")
+        del_p.setObjectName("mini_btn")
+        del_p.clicked.connect(self._delete_provider)
+        prov_btns.addWidget(add_p)
+        prov_btns.addWidget(del_p)
+        left.addLayout(prov_btns)
+        cols.addLayout(left)
+
+        # 右：服务商详情 + 模型
+        right = QVBoxLayout()
+        right.setSpacing(7)
+
+        row_name = QHBoxLayout()
+        row_name.addWidget(QLabel("名称:"))
+        self._p_name = QLineEdit()
+        self._p_name.editingFinished.connect(self._on_name_edited)
+        row_name.addWidget(self._p_name, 1)
+        row_name.addWidget(QLabel("协议:"))
+        self._p_kind = QComboBox()
+        for disp, _k in _KINDS:
+            self._p_kind.addItem(disp)
+        self._p_kind.currentIndexChanged.connect(self._on_kind_changed)
+        row_name.addWidget(self._p_kind)
+        right.addLayout(row_name)
+
+        right.addWidget(QLabel("Endpoint:"))
+        self._p_endpoint = QLineEdit()
+        self._p_endpoint.setPlaceholderText("https://api.openai.com")
+        right.addWidget(self._p_endpoint)
+
+        key_label = QHBoxLayout()
+        key_label.addWidget(QLabel("API Key:"))
+        key_label.addStretch()
+        self._p_show_key = QCheckBox("显示")
+        self._p_show_key.toggled.connect(
+            lambda c: self._p_key.setEchoMode(
+                QLineEdit.EchoMode.Normal if c else QLineEdit.EchoMode.Password)
+        )
+        key_label.addWidget(self._p_show_key)
+        right.addLayout(key_label)
+        self._p_key = QLineEdit()
+        self._p_key.setEchoMode(QLineEdit.EchoMode.Password)
+        right.addWidget(self._p_key)
+
+        extra_row = QHBoxLayout()
+        extra_row.addWidget(QLabel("额外请求参数 (JSON，合并进请求体):"))
+        extra_row.addStretch()
+        tmpl_btn = QPushButton("填入模板")
+        tmpl_btn.setObjectName("mini_btn")
+        tmpl_btn.clicked.connect(lambda: self._p_extra.setText('{"enable_thinking": false}'))
+        extra_row.addWidget(tmpl_btn)
+        right.addLayout(extra_row)
+        self._p_extra = QTextEdit()
+        self._p_extra.setMaximumHeight(48)
+        self._p_extra.setPlaceholderText('例如关闭深度思考: {"enable_thinking": false}')
+        right.addWidget(self._p_extra)
+
+        # 模型区
+        m_header = QHBoxLayout()
+        m_label = QLabel("模型")
+        m_label.setObjectName("section_label")
+        m_header.addWidget(m_label)
+        m_header.addStretch()
+        self._fetch_status = QLabel("")
+        self._fetch_status.setObjectName("fetch_status")
+        m_header.addWidget(self._fetch_status)
+        right.addLayout(m_header)
+
+        self._model_list = QListWidget()
+        self._model_list.setObjectName("sub_list")
+        self._model_list.setFixedHeight(116)
+        self._model_list.currentRowChanged.connect(self._on_model_selected)
+        right.addWidget(self._model_list)
+
+        m_btns = QHBoxLayout()
+        self._fetch_btn = QPushButton("获取列表")
+        self._fetch_btn.setObjectName("mini_btn")
+        self._fetch_btn.clicked.connect(self._fetch_models)
+        add_m = QPushButton("＋ 模型")
+        add_m.setObjectName("mini_btn")
+        add_m.clicked.connect(self._add_model)
+        del_m = QPushButton("－ 删除")
+        del_m.setObjectName("mini_btn")
+        del_m.clicked.connect(self._delete_model)
+        m_btns.addWidget(self._fetch_btn)
+        m_btns.addWidget(add_m)
+        m_btns.addWidget(del_m)
+        m_btns.addStretch()
+        right.addLayout(m_btns)
+
+        # 模型编辑器
+        editor = QHBoxLayout()
+        editor.addWidget(QLabel("模型 ID:"))
+        self._m_id = QLineEdit()
+        self._m_id.setPlaceholderText("gpt-4o")
+        editor.addWidget(self._m_id, 2)
+        editor.addWidget(QLabel("显示名:"))
+        self._m_name = QLineEdit()
+        self._m_name.setPlaceholderText("可留空")
+        editor.addWidget(self._m_name, 2)
+        self._m_vision = QCheckBox("视觉 👁")
+        editor.addWidget(self._m_vision)
+        right.addLayout(editor)
+
+        ed_btns = QHBoxLayout()
+        apply_m = QPushButton("应用修改")
+        apply_m.setObjectName("mini_btn")
+        apply_m.clicked.connect(self._apply_model_edit)
+        set_default = QPushButton("设为默认模型")
+        set_default.setObjectName("mini_btn")
+        set_default.clicked.connect(self._set_default_model)
+        ed_btns.addWidget(apply_m)
+        ed_btns.addWidget(set_default)
+        ed_btns.addStretch()
+        right.addLayout(ed_btns)
+
+        right.addWidget(self._hline())
+
+        proxy_row = QHBoxLayout()
+        proxy_row.addWidget(QLabel("全局代理:"))
+        self._p_proxy = QLineEdit()
+        self._p_proxy.setPlaceholderText("http://127.0.0.1:7890（所有服务商共用，可留空）")
+        proxy_row.addWidget(self._p_proxy, 1)
+        right.addLayout(proxy_row)
+
+        cols.addLayout(right, 1)
+        layout.addLayout(cols, 1)
+        return self._scrollable(inner)
+
+    def _hline(self) -> QFrame:
+        line = QFrame()
+        line.setObjectName("hline")
+        line.setFrameShape(QFrame.Shape.HLine)
+        return line
+
+    # ── 服务商 / 模型 工作副本逻辑 ────────────────────────────────────────────
+
+    def _prov_label(self, p: dict) -> str:
+        kind_disp = KIND_MAP.get(p.get("kind", "openai"), "OpenAI 兼容")
+        return f"{p.get('name') or p.get('id')}  ·  {kind_disp}"
+
+    def _model_label(self, m: dict, active: bool) -> str:
+        name = m.get("name") or m.get("id") or "(未命名)"
+        vis = "👁 " if m.get("vision") else ""
+        star = "● " if active else ""
+        mid = m.get("id", "")
+        suffix = f"  ({mid})" if (m.get("name") and mid and m.get("name") != mid) else ""
+        return f"{star}{vis}{name}{suffix}"
+
+    def _reload_provider_list(self, select: int = 0):
+        self._loading = True
+        self._prov_list.clear()
+        for p in self._providers:
+            QListWidgetItem(self._prov_label(p), self._prov_list)
+        self._loading = False
+        if self._providers:
+            self._prov_list.setCurrentRow(max(0, min(select, len(self._providers) - 1)))
+        else:
+            self._cur_prov_index = -1
+            self._load_provider_form(None)
+            self._reload_model_list()
+
+    def _on_provider_selected(self, row: int):
+        if self._loading:
+            return
+        # 先提交旧选择
+        self._commit_model_form()
+        self._commit_provider_form()
+        self._cur_prov_index = row
+        self._cur_model_index = -1
+        prov = self._providers[row] if 0 <= row < len(self._providers) else None
+        self._load_provider_form(prov)
+        self._reload_model_list()
+        self._fetch_status.setText("")
+
+    def _load_provider_form(self, prov: dict | None):
+        self._loading = True
+        if prov is None:
+            self._p_name.setText("")
+            self._p_kind.setCurrentIndex(0)
+            self._p_endpoint.setText("")
+            self._p_key.setText("")
+            self._p_extra.setText("")
+            self._set_form_enabled(False)
+        else:
+            self._set_form_enabled(True)
+            self._p_name.setText(prov.get("name", ""))
+            kind = prov.get("kind", "openai")
+            self._p_kind.setCurrentIndex(1 if kind == "claude" else 0)
+            self._p_endpoint.setText(prov.get("endpoint", ""))
+            self._p_key.setText(prov.get("api_key", ""))
+            self._p_extra.setText(prov.get("extra_body", ""))
+        self._loading = False
+
+    def _set_form_enabled(self, on: bool):
+        for w in (self._p_name, self._p_kind, self._p_endpoint, self._p_key,
+                  self._p_extra, self._model_list, self._m_id, self._m_name,
+                  self._m_vision, self._fetch_btn):
+            w.setEnabled(on)
+
+    def _commit_provider_form(self):
+        if not (0 <= self._cur_prov_index < len(self._providers)):
+            return
+        p = self._providers[self._cur_prov_index]
+        p["name"] = self._p_name.text().strip() or p.get("id", "服务商")
+        p["kind"] = _KINDS[self._p_kind.currentIndex()][1]
+        p["endpoint"] = self._p_endpoint.text().strip()
+        p["api_key"] = self._p_key.text().strip()
+        p["extra_body"] = self._p_extra.toPlainText().strip()
+
+    def _on_name_edited(self):
+        self._refresh_cur_prov_label()
+
+    def _on_kind_changed(self, _idx: int):
+        self._refresh_cur_prov_label()
+
+    def _refresh_cur_prov_label(self):
+        if self._loading or not (0 <= self._cur_prov_index < len(self._providers)):
+            return
+        self._commit_provider_form()
+        self._loading = True
+        item = self._prov_list.item(self._cur_prov_index)
+        if item:
+            item.setText(self._prov_label(self._providers[self._cur_prov_index]))
+        self._loading = False
+
+    def _add_provider(self):
+        self._commit_model_form()
+        self._commit_provider_form()
+        new = {
+            "id": new_provider_id(),
+            "name": f"新服务商 {len(self._providers) + 1}",
+            "kind": "openai",
+            "endpoint": "",
+            "api_key": "",
+            "extra_body": "",
+            "models": [],
+        }
+        self._providers.append(new)
+        self._reload_provider_list(select=len(self._providers) - 1)
+
+    def _delete_provider(self):
+        if not (0 <= self._cur_prov_index < len(self._providers)):
+            return
+        p = self._providers[self._cur_prov_index]
+        if QMessageBox.question(
+            self, "删除服务商", f"确定删除「{p.get('name')}」及其所有模型？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        idx = self._cur_prov_index
+        del self._providers[idx]
+        self._cur_prov_index = -1
+        self._finalize_active()   # 删掉的可能是默认服务商，立即重定位默认指针
+        self._reload_provider_list(select=max(0, idx - 1))
+
+    # ── 模型逻辑 ──────────────────────────────────────────────────────────────
+
+    def _cur_models(self) -> list:
+        if 0 <= self._cur_prov_index < len(self._providers):
+            return self._providers[self._cur_prov_index].setdefault("models", [])
+        return []
+
+    def _reload_model_list(self, select: int = -1):
+        self._loading = True
+        self._model_list.clear()
+        models = self._cur_models()
+        pid = self._providers[self._cur_prov_index]["id"] if 0 <= self._cur_prov_index < len(self._providers) else ""
+        for m in models:
+            active = (pid == self._active_pid and m.get("id") == self._active_mid)
+            QListWidgetItem(self._model_label(m, active), self._model_list)
+        self._loading = False
+        if models and select >= 0:
+            self._model_list.setCurrentRow(min(select, len(models) - 1))
+        else:
+            self._cur_model_index = -1
+            self._load_model_form(None)
+
+    def _on_model_selected(self, row: int):
+        if self._loading:
+            return
+        self._commit_model_form()
+        self._cur_model_index = row
+        models = self._cur_models()
+        m = models[row] if 0 <= row < len(models) else None
+        self._load_model_form(m)
+
+    def _load_model_form(self, m: dict | None):
+        self._loading = True
+        if m is None:
+            self._m_id.setText("")
+            self._m_name.setText("")
+            self._m_vision.setChecked(False)
+        else:
+            self._m_id.setText(m.get("id", ""))
+            self._m_name.setText(m.get("name", ""))
+            self._m_vision.setChecked(bool(m.get("vision")))
+        self._loading = False
+
+    def _commit_model_form(self):
+        models = self._cur_models()
+        if not (0 <= self._cur_model_index < len(models)):
+            return
+        m = models[self._cur_model_index]
+        old_id = m.get("id", "")
+        m["id"] = self._m_id.text().strip()
+        m["name"] = self._m_name.text().strip()
+        m["vision"] = self._m_vision.isChecked()
+        # 若改的是默认模型的 id，同步默认指针
+        prov = self._providers[self._cur_prov_index]
+        if prov["id"] == self._active_pid and old_id == self._active_mid:
+            self._active_mid = m["id"]
+
+    def _apply_model_edit(self):
+        if not (0 <= self._cur_model_index < len(self._cur_models())):
+            return
+        self._commit_model_form()
+        self._reload_model_list(select=self._cur_model_index)
+
+    def _add_model(self):
+        if not (0 <= self._cur_prov_index < len(self._providers)):
+            return
+        self._commit_model_form()
+        self._cur_models().append({"id": "", "name": "", "vision": False})
+        self._reload_model_list(select=len(self._cur_models()) - 1)
+        self._m_id.setFocus()
+
+    def _delete_model(self):
+        models = self._cur_models()
+        if not (0 <= self._cur_model_index < len(models)):
+            return
+        idx = self._cur_model_index
+        deleted = models[idx]
+        prov = self._providers[self._cur_prov_index]
+        del models[idx]
+        self._cur_model_index = -1
+        # 若删的是当前默认模型，立即重定位默认指针，使 ● 标记不丢失
+        if prov.get("id") == self._active_pid and deleted.get("id") == self._active_mid:
+            self._finalize_active()
+        self._reload_model_list(select=max(0, idx - 1) if models else -1)
+
+    def _set_default_model(self):
+        models = self._cur_models()
+        if not (0 <= self._cur_model_index < len(models)):
+            return
+        self._commit_model_form()
+        self._active_pid = self._providers[self._cur_prov_index]["id"]
+        self._active_mid = models[self._cur_model_index].get("id", "")
+        self._reload_model_list(select=self._cur_model_index)
+
+    def _fetch_models(self):
+        if not (0 <= self._cur_prov_index < len(self._providers)):
+            return
+        self._commit_provider_form()
+        p = self._providers[self._cur_prov_index]
+        self._fetch_btn.setEnabled(False)
+        self._fetch_status.setText("获取中…")
+        self._fetch_status.setStyleSheet("color: #aaa;")
+        client = ApiClient(
+            kind=p.get("kind", "openai"),
+            api_key=p.get("api_key", ""),
+            model="",
+            endpoint=p.get("endpoint", ""),
+            proxy=self._p_proxy.text().strip(),
+        )
+        self._model_worker = ModelFetchWorker(client)
+        self._model_worker.done.connect(self._on_models_fetched)
+        self._model_worker.start()
+
+    def _on_models_fetched(self, model_ids: list, error: str):
+        self._fetch_btn.setEnabled(True)
+        if error:
+            self._fetch_status.setText(f"✗ {error[:60]}")
+            self._fetch_status.setStyleSheet("color: #f06292;")
+            return
+        models = self._cur_models()
+        existing = {m.get("id") for m in models}
+        added = 0
+        for mid in model_ids:
+            if mid and mid not in existing:
+                models.append({"id": mid, "name": "", "vision": model_guess_vision(mid)})
+                existing.add(mid)
+                added += 1
+        self._fetch_status.setText(f"✓ 共 {len(model_ids)} 个，新增 {added}")
+        self._fetch_status.setStyleSheet("color: #81c784;")
+        self._reload_model_list(select=self._cur_model_index if self._cur_model_index >= 0 else -1)
+
+    # ── 页 2：视觉识别（中继）────────────────────────────────────────────────
+
+    def _create_vision_page(self) -> QWidget:
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(9)
+
+        tip = QLabel(
+            "直接在对话顶部选择带 👁 的视觉模型，即可发送截图 / 图片。\n"
+            "下方「视觉识别中继」是可选的兜底：当前模型不支持图片时，先用指定的视觉模型"
+            "把截图转成文字，再交给当前模型回答。"
+        )
+        tip.setObjectName("page_hint")
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+
+        self._v_enabled = QCheckBox("启用视觉识别中继")
+        layout.addWidget(self._v_enabled)
+
+        layout.addWidget(QLabel("视觉模型 — 服务商:"))
+        self._v_provider = QComboBox()
+        self._v_provider.currentIndexChanged.connect(self._on_relay_provider_changed)
+        layout.addWidget(self._v_provider)
+
+        layout.addWidget(QLabel("视觉模型 — 模型:"))
+        self._v_model = QComboBox()
+        layout.addWidget(self._v_model)
+
+        layout.addWidget(QLabel("识别提示词（告诉视觉模型如何转写图片）:"))
+        self._v_prompt = QTextEdit()
+        self._v_prompt.setMaximumHeight(120)
+        layout.addWidget(self._v_prompt)
+
+        layout.addStretch()
+        return self._scrollable(inner)
+
+    def _refresh_relay_provider_combo(self):
+        cur_pid = self._v_provider.currentData()
+        self._loading = True
+        self._v_provider.clear()
+        for p in self._providers:
+            self._v_provider.addItem(p.get("name") or p.get("id"), p.get("id"))
+        self._loading = False
+        # 还原之前选中的服务商
+        idx = 0
+        for i in range(self._v_provider.count()):
+            if self._v_provider.itemData(i) == cur_pid:
+                idx = i
+                break
+        if self._v_provider.count():
+            self._v_provider.setCurrentIndex(idx)
+        self._on_relay_provider_changed()
+
+    def _on_relay_provider_changed(self, *_):
+        if self._loading:
+            return
+        cur_mid = self._v_model.currentData()
+        pid = self._v_provider.currentData()
+        prov = next((p for p in self._providers if p.get("id") == pid), None)
+        self._v_model.clear()
+        if prov:
+            for m in prov.get("models", []):
+                label = m.get("name") or m.get("id")
+                if m.get("vision"):
+                    label = f"👁 {label}"
+                self._v_model.addItem(label, m.get("id"))
+        for i in range(self._v_model.count()):
+            if self._v_model.itemData(i) == cur_mid:
+                self._v_model.setCurrentIndex(i)
+                break
+
+    # ── 页 3：快捷键 ──────────────────────────────────────────────────────────
+
+    def _create_hotkey_page(self) -> QWidget:
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
 
         hotkeys = [
             ("唤起/隐藏对话窗", "toggle_chat"),
@@ -262,19 +674,23 @@ class SettingsPanel(QWidget):
         self._s_hotkeys: dict[str, HotkeyInput] = {}
         for label_text, key_name in hotkeys:
             row = QHBoxLayout()
-            row.addWidget(QLabel(label_text))
+            lab = QLabel(label_text)
+            lab.setFixedWidth(150)
+            row.addWidget(lab)
             hk = HotkeyInput()
             self._s_hotkeys[key_name] = hk
-            row.addWidget(hk)
+            row.addWidget(hk, 1)
             layout.addLayout(row)
-
         layout.addStretch()
-        return w
+        return self._scrollable(inner)
 
-    def _create_appearance_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setSpacing(8)
+    # ── 页 4：外观 ────────────────────────────────────────────────────────────
+
+    def _create_appearance_page(self) -> QWidget:
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(9)
 
         self._s_tray = QCheckBox("显示系统托盘图标")
         layout.addWidget(self._s_tray)
@@ -314,20 +730,23 @@ class SettingsPanel(QWidget):
         layout.addWidget(self._s_theme)
 
         layout.addStretch()
-        return w
+        return self._scrollable(inner)
 
-    def _create_privacy_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setSpacing(8)
+    # ── 页 5：隐私 ────────────────────────────────────────────────────────────
 
-        self._s_screenshot_protect = QCheckBox("截屏保护")
+    def _create_privacy_page(self) -> QWidget:
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(9)
+
+        self._s_screenshot_protect = QCheckBox("截屏保护（窗口对截屏/录屏不可见）")
         layout.addWidget(self._s_screenshot_protect)
 
         row = QHBoxLayout()
         row.addWidget(QLabel("记录保留天数 (0=永久):"))
         self._s_retention = QLineEdit()
-        self._s_retention.setFixedWidth(60)
+        self._s_retention.setFixedWidth(70)
         row.addWidget(self._s_retention)
         row.addStretch()
         layout.addLayout(row)
@@ -339,11 +758,14 @@ class SettingsPanel(QWidget):
         layout.addWidget(self._s_clear_on_exit)
 
         layout.addStretch()
-        return w
+        return self._scrollable(inner)
 
-    def _create_behavior_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
+    # ── 页 6：行为 ────────────────────────────────────────────────────────────
+
+    def _create_behavior_page(self) -> QWidget:
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(8)
 
         self._s_autostart = QCheckBox("开机自启动")
@@ -359,12 +781,12 @@ class SettingsPanel(QWidget):
 
         layout.addWidget(QLabel("普通对话 System Prompt:"))
         self._s_prompt_chat = QTextEdit()
-        self._s_prompt_chat.setMaximumHeight(60)
+        self._s_prompt_chat.setMaximumHeight(56)
         layout.addWidget(self._s_prompt_chat)
 
         layout.addWidget(QLabel("截图场景 System Prompt:"))
         self._s_prompt_screenshot = QTextEdit()
-        self._s_prompt_screenshot.setMaximumHeight(60)
+        self._s_prompt_screenshot.setMaximumHeight(56)
         layout.addWidget(self._s_prompt_screenshot)
 
         layout.addWidget(QLabel("截图附带的用户消息:"))
@@ -373,35 +795,39 @@ class SettingsPanel(QWidget):
         layout.addWidget(self._s_screenshot_message)
 
         layout.addStretch()
-        return w
+        return self._scrollable(inner)
 
-    def _create_about_tab(self) -> QWidget:
-        w = QWidget()
-        layout = QVBoxLayout(w)
+    # ── 页 7：关于 ────────────────────────────────────────────────────────────
+
+    def _create_about_page(self) -> QWidget:
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(18, 16, 18, 16)
         layout.addStretch()
         layout.addWidget(QLabel("Windows Display Adapter Helper"))
-        layout.addWidget(QLabel("版本 1.0.0"))
+        layout.addWidget(QLabel("版本 1.1.0"))
         layout.addStretch()
-        return w
+        return inner
+
+    # ── 读取 / 保存 ───────────────────────────────────────────────────────────
 
     def _load_values(self):
+        import copy
         c = self._config
-        self._s_provider.setCurrentText(PROVIDER_MAP.get(c.provider, "Claude"))
-        self._s_api_key.setText(c.api_key)
-        self._s_model.setText(c.api_model)
-        self._s_endpoint.setText(c.api_endpoint)
-        self._s_proxy.setText(c.get("api.proxy", ""))
-        self._s_extra_body.setText(c.api_extra_body_raw)
+        # 服务商工作副本
+        self._providers = copy.deepcopy(c.providers())
+        self._active_pid = c.get("api.active.provider", "")
+        self._active_mid = c.get("api.active.model", "")
+        self._cur_prov_index = -1
+        self._cur_model_index = -1
+        self._reload_provider_list(select=self._active_index())
+        self._p_proxy.setText(c.get("api.proxy", ""))
 
-        vp = c.get("api.vision.provider", "claude")
-        vp_disp = {v: k for k, v in self._VISION_PROVIDERS.items()}.get(vp, "Claude")
-        self._s_vision_enabled.setChecked(c.get("api.vision.enabled", False))
-        self._s_vision_provider.setCurrentText(vp_disp)
-        self._s_vision_key.setText(c.get("api.vision.api_key", ""))
-        self._s_vision_model.setText(c.get("api.vision.model", ""))
-        self._s_vision_endpoint.setText(c.get("api.vision.endpoint", ""))
-        self._s_vision_extra.setText(c.get("api.vision.extra_body", ""))
-        self._s_vision_prompt.setText(c.get("api.vision.prompt", ""))
+        # 视觉中继
+        self._v_enabled.setChecked(c.get("api.vision_relay.enabled", False))
+        self._v_prompt.setText(c.get("api.vision_relay.prompt", DEFAULT_VISION_PROMPT))
+        self._refresh_relay_provider_combo()
+        self._select_relay(c.get("api.vision_relay.provider", ""), c.get("api.vision_relay.model", ""))
 
         for name, widget in self._s_hotkeys.items():
             val = c.get(f"hotkeys.{name}", "")
@@ -425,42 +851,77 @@ class SettingsPanel(QWidget):
 
         self._s_autostart.setChecked(c.get("display.auto_start", True))
         self._s_close_on_focus.setChecked(c.get("display.close_on_focus_lost", False))
-        procs = c.get("environment.suspicious_processes", [])
-        self._s_processes.setText("\n".join(procs))
+        self._s_processes.setText("\n".join(c.get("environment.suspicious_processes", [])))
         self._s_prompt_chat.setText(c.get("prompts.chat", ""))
         self._s_prompt_screenshot.setText(c.get("prompts.screenshot", ""))
         self._s_screenshot_message.setText(c.get("prompts.screenshot_message", "请分析这张截图"))
 
-        self._fetch_status.setVisible(False)
-        self._model_list_combo.setVisible(False)
-        self._fetch_models_btn.setEnabled(True)
+    def _active_index(self) -> int:
+        for i, p in enumerate(self._providers):
+            if p.get("id") == self._active_pid:
+                return i
+        return 0
+
+    def _select_relay(self, pid: str, mid: str):
+        for i in range(self._v_provider.count()):
+            if self._v_provider.itemData(i) == pid:
+                self._v_provider.setCurrentIndex(i)
+                break
+        self._on_relay_provider_changed()
+        for i in range(self._v_model.count()):
+            if self._v_model.itemData(i) == mid:
+                self._v_model.setCurrentIndex(i)
+                break
+
+    def _finalize_active(self):
+        """保证默认模型指向真实存在的服务商/模型。"""
+        prov = next((p for p in self._providers if p.get("id") == self._active_pid), None)
+        if prov is None:
+            prov = self._providers[0] if self._providers else None
+            self._active_pid = prov["id"] if prov else ""
+        if prov:
+            mids = [m.get("id") for m in prov.get("models", []) if m.get("id")]
+            if self._active_mid not in mids:
+                self._active_mid = mids[0] if mids else ""
 
     def _save(self):
         c = self._config
-        inv_provider = {v: k for k, v in PROVIDER_MAP.items()}
-        inv_position = {v: k for k, v in POSITION_MAP.items()}
-        inv_disguise = {v: k for k, v in DISGUISE_MAP.items()}
+        self._commit_model_form()
+        self._commit_provider_form()
 
-        provider = inv_provider.get(self._s_provider.currentText(), "custom")
-        c.set("api.provider", provider)
-        c.set(f"api.providers.{provider}.api_key", self._s_api_key.text().strip())
-        c.set(f"api.providers.{provider}.model", self._s_model.text().strip())
-        c.set(f"api.providers.{provider}.endpoint", self._s_endpoint.text().strip())
-        c.set("api.proxy", self._s_proxy.text().strip())
-        c.set(f"api.providers.{provider}.extra_body", self._s_extra_body.toPlainText().strip())
+        # 清理空模型 / 空服务商内的空模型 id
+        for p in self._providers:
+            p["models"] = [m for m in p.get("models", []) if m.get("id")]
+        self._finalize_active()
 
-        c.set("api.vision.enabled", self._s_vision_enabled.isChecked())
-        c.set("api.vision.provider", self._VISION_PROVIDERS.get(self._s_vision_provider.currentText(), "claude"))
-        c.set("api.vision.api_key", self._s_vision_key.text().strip())
-        c.set("api.vision.model", self._s_vision_model.text().strip())
-        c.set("api.vision.endpoint", self._s_vision_endpoint.text().strip())
-        c.set("api.vision.extra_body", self._s_vision_extra.toPlainText().strip())
-        c.set("api.vision.prompt", self._s_vision_prompt.toPlainText())
+        c.set("api.providers", self._providers)
+        c.set("api.active.provider", self._active_pid)
+        c.set("api.active.model", self._active_mid)
+        c.set("api.proxy", self._p_proxy.text().strip())
+
+        # 视觉中继：校验用户选中的目标是否仍存在于编辑后的服务商工作副本里。
+        # 若其服务商/模型已被删除或改名，则停用并清空，绝不静默改指向其它服务商。
+        rpid = self._v_provider.currentData() or ""
+        rmid = self._v_model.currentData() or ""
+        rprov = next((p for p in self._providers if p.get("id") == rpid), None)
+        if rprov is None:
+            rpid, rmid = "", ""
+        else:
+            rmids = [m.get("id") for m in rprov.get("models", []) if m.get("id")]
+            if rmid not in rmids:
+                rmid = ""
+        relay_ok = bool(rpid and rmid)
+        c.set("api.vision_relay.enabled", self._v_enabled.isChecked() and relay_ok)
+        c.set("api.vision_relay.provider", rpid)
+        c.set("api.vision_relay.model", rmid)
+        c.set("api.vision_relay.prompt", self._v_prompt.toPlainText())
 
         for name, widget in self._s_hotkeys.items():
             if widget.hotkey:
                 c.set(f"hotkeys.{name}", widget.hotkey)
 
+        inv_position = {v: k for k, v in POSITION_MAP.items()}
+        inv_disguise = {v: k for k, v in DISGUISE_MAP.items()}
         c.set("display.tray_icon", self._s_tray.isChecked())
         c.set("display.chat_position", inv_position.get(self._s_position.currentText(), "bottom_right"))
         c.set("display.chat_opacity", self._s_opacity.value() / 100.0)
@@ -508,18 +969,15 @@ class SettingsPanel(QWidget):
         )
 
     def _import_config(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "导入配置", "", "JSON 文件 (*.json)"
-        )
+        path, _ = QFileDialog.getOpenFileName(self, "导入配置", "", "JSON 文件 (*.json)")
         if not path:
             return
-        confirm = QMessageBox.question(
+        if QMessageBox.question(
             self, "确认导入",
             "导入将覆盖当前全部配置并立即保存，确定继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
+        ) != QMessageBox.StandardButton.Yes:
             return
         try:
             self._config.import_json(path)
@@ -533,46 +991,17 @@ class SettingsPanel(QWidget):
             "配置已导入并保存。\n热键等部分设置可能需要重启应用后生效。"
         )
 
-    def _fetch_models(self):
-        provider = {v: k for k, v in PROVIDER_MAP.items()}.get(self._s_provider.currentText(), "custom")
-        self._fetch_models_btn.setEnabled(False)
-        self._fetch_status.setText("获取中...")
-        self._fetch_status.setStyleSheet("color: #aaa; font-size: 11px;")
-        self._fetch_status.setVisible(True)
-        self._model_list_combo.setVisible(False)
-
-        client = ApiClient(
-            provider=provider,
-            api_key=self._s_api_key.text().strip(),
-            model="",
-            endpoint=self._s_endpoint.text().strip(),
-            proxy=self._s_proxy.text().strip(),
-        )
-        self._model_worker = ModelFetchWorker(client)
-        self._model_worker.done.connect(self._on_models_fetched)
-        self._model_worker.start()
-
-    def _on_models_fetched(self, models: list, error: str):
-        self._fetch_models_btn.setEnabled(True)
-        if error:
-            self._fetch_status.setText(f"✗ {error[:80]}")
-            self._fetch_status.setStyleSheet("color: #f44336; font-size: 11px;")
-        else:
-            self._fetch_status.setText(f"✓ {len(models)} 个模型，点击选择")
-            self._fetch_status.setStyleSheet("color: #4CAF50; font-size: 11px;")
-            self._model_list_combo.clear()
-            self._model_list_combo.addItems(models)
-            current = self._s_model.text().strip()
-            if current in models:
-                self._model_list_combo.setCurrentText(current)
-            self._model_list_combo.setVisible(True)
-
     def _on_close(self):
         self.hide()
         self.closed.emit()
 
+    def open_providers_page(self):
+        self._nav.setCurrentRow(0)
+
+    # ── 拖动 ──────────────────────────────────────────────────────────────────
+
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and event.position().y() < 40:
+        if event.button() == Qt.MouseButton.LeftButton and event.position().y() < 46:
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, event):
@@ -582,86 +1011,111 @@ class SettingsPanel(QWidget):
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
 
+    # ── 样式 ──────────────────────────────────────────────────────────────────
+
     def _apply_style(self):
         self.setStyleSheet("""
             #settings_container {
-                background-color: rgba(35, 35, 35, 245);
-                border-radius: 10px;
-                border: 1px solid rgba(255,255,255,25);
+                background-color: rgba(32, 32, 34, 248);
+                border-radius: 12px;
+                border: 1px solid rgba(255,255,255,28);
             }
-            #settings_title { color: #e0e0e0; }
+            #settings_titlebar {
+                background: rgba(40,40,42,250);
+                border-top-left-radius: 12px; border-top-right-radius: 12px;
+                border-bottom: 1px solid rgba(255,255,255,12);
+            }
+            #settings_title { color: #ececec; }
             #close_btn {
-                background: transparent; color: #888;
-                border: none; border-radius: 4px; font-size: 16px;
+                background: transparent; color: #999;
+                border: none; border-radius: 6px; font-size: 18px;
             }
             #close_btn:hover { background: #c42b1c; color: white; }
-            QTabWidget::pane {
-                border: 1px solid rgba(255,255,255,15);
-                border-radius: 4px;
-                background: rgba(40,40,40,200);
+            #settings_footer {
+                background: rgba(40,40,42,250);
+                border-bottom-left-radius: 12px; border-bottom-right-radius: 12px;
+                border-top: 1px solid rgba(255,255,255,12);
             }
-            QTabBar::tab {
-                background: rgba(50,50,50,200);
-                color: #aaa;
-                padding: 6px 12px;
-                border: none;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-                margin-right: 2px;
-                font-size: 11px;
+            #nav_list {
+                background: rgba(26,26,28,250);
+                border: none; outline: none;
+                border-bottom-left-radius: 12px;
+                padding: 8px 6px;
+                font-family: 'Microsoft YaHei'; font-size: 12px;
             }
-            QTabBar::tab:selected { background: rgba(60,60,60,250); color: #e0e0e0; }
+            #nav_list::item {
+                color: #b0b0b0; padding: 9px 12px; border-radius: 7px; margin: 2px 2px;
+            }
+            #nav_list::item:selected { background: rgba(59,130,246,180); color: white; }
+            #nav_list::item:hover:!selected { background: rgba(255,255,255,16); color: #e0e0e0; }
+            #pages { background: transparent; }
+            #page_hint { color: #8a8a8a; font-size: 11px; }
+            #section_label { color: #cfcfcf; font-size: 12px; font-weight: bold; }
+            #fetch_status { font-size: 11px; }
+            #hline { background: rgba(255,255,255,15); max-height: 1px; border: none; }
             QLabel { color: #ccc; font-size: 12px; }
+            #sub_list {
+                background: rgba(48,48,52,200); color: #e0e0e0;
+                border: 1px solid rgba(255,255,255,18); border-radius: 7px;
+                outline: none; font-size: 12px; font-family: 'Microsoft YaHei';
+            }
+            #sub_list::item { padding: 6px 8px; border-radius: 5px; }
+            #sub_list::item:selected { background: rgba(59,130,246,170); color: white; }
+            #sub_list::item:hover:!selected { background: rgba(255,255,255,14); }
             QLineEdit, QComboBox {
-                background: rgba(50,50,50,200);
-                color: #e0e0e0;
+                background: rgba(50,50,54,210);
+                color: #e8e8e8;
                 border: 1px solid rgba(255,255,255,20);
-                border-radius: 4px;
-                padding: 5px 8px;
+                border-radius: 7px;
+                padding: 6px 9px;
                 font-size: 12px;
             }
-            QLineEdit:focus, QComboBox:focus { border-color: rgba(59,130,246,150); }
+            QLineEdit:focus, QComboBox:focus { border-color: rgba(59,130,246,160); }
+            QLineEdit:disabled, QComboBox:disabled, QTextEdit:disabled { color: #666; }
             QTextEdit {
-                background: rgba(50,50,50,200);
-                color: #e0e0e0;
+                background: rgba(50,50,54,210);
+                color: #e8e8e8;
                 border: 1px solid rgba(255,255,255,20);
-                border-radius: 4px;
+                border-radius: 7px;
                 font-size: 12px;
             }
             QCheckBox { color: #ccc; spacing: 6px; }
             QCheckBox::indicator {
                 width: 16px; height: 16px;
                 border: 1px solid rgba(255,255,255,30);
-                border-radius: 3px;
-                background: rgba(50,50,50,200);
+                border-radius: 4px;
+                background: rgba(50,50,54,210);
             }
-            QCheckBox::indicator:checked { background: #4a90d9; border-color: #4a90d9; }
+            QCheckBox::indicator:checked { background: #3b82f6; border-color: #3b82f6; }
             QSlider::groove:horizontal { height: 4px; background: rgba(255,255,255,20); border-radius: 2px; }
             QSlider::handle:horizontal {
                 width: 14px; height: 14px; margin: -5px 0;
-                background: #4a90d9; border-radius: 7px;
+                background: #3b82f6; border-radius: 7px;
             }
-            #fill_template_btn {
-                padding: 2px 8px;
-                background: rgba(74,144,217,80); color: #aac8f0;
-                border: 1px solid rgba(74,144,217,100); border-radius: 3px; font-size: 11px;
+            #mini_btn {
+                padding: 5px 12px;
+                background: rgba(255,255,255,14); color: #d8d8d8;
+                border: 1px solid rgba(255,255,255,22); border-radius: 6px; font-size: 11px;
             }
-            #fill_template_btn:hover { background: rgba(74,144,217,150); color: white; }
+            #mini_btn:hover { background: rgba(59,130,246,140); color: white; border-color: rgba(59,130,246,160); }
             #save_btn {
-                padding: 7px 24px;
-                background: #4a90d9; color: white;
-                border: none; border-radius: 4px; font-size: 12px;
+                padding: 8px 28px;
+                background: #3b82f6; color: white;
+                border: none; border-radius: 8px; font-size: 12px;
             }
-            #save_btn:hover { background: #3a7bc8; }
+            #save_btn:hover { background: #2f6fe0; }
             #io_btn {
-                padding: 7px 14px;
-                background: rgba(70,70,70,200); color: #ccc;
-                border: 1px solid rgba(255,255,255,20); border-radius: 4px; font-size: 12px;
+                padding: 8px 16px;
+                background: rgba(255,255,255,12); color: #d0d0d0;
+                border: 1px solid rgba(255,255,255,20); border-radius: 8px; font-size: 12px;
             }
-            #io_btn:hover { background: rgba(90,90,90,230); color: #fff; }
+            #io_btn:hover { background: rgba(255,255,255,24); color: #fff; }
             QComboBox QAbstractItemView {
-                background: #2d2d2d; color: #e0e0e0;
-                selection-background-color: #404040;
-                border: 1px solid #404040;
+                background: #2d2d2f; color: #e0e0e0;
+                selection-background-color: rgba(59,130,246,180);
+                border: 1px solid #404044;
             }
+            QScrollBar:vertical { width: 7px; background: transparent; }
+            QScrollBar::handle:vertical { background: rgba(255,255,255,40); border-radius: 3px; min-height: 22px; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
         """)

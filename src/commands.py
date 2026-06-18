@@ -14,17 +14,20 @@ class CommandHandler(QObject):
     show_help = pyqtSignal()
     unknown_command = pyqtSignal(str)
 
-    HELP_TEXT = """可用命令：
-/settings - 打开设置
-/new - 新建对话
-/list - 对话列表
-/clear - 清除当前对话
-/delete - 删除当前对话
-/model - 切换模型
-/t [文字] - 翻译
-/s - 总结剪贴板
-/export - 导出对话
-/help - 显示帮助"""
+    HELP_TEXT = """可用功能（也可点右上角 ⋯ 菜单）：
+/new — 新建对话
+/list — 历史对话
+/clear — 清空当前对话
+/delete — 删除当前对话
+/export — 导出对话
+/t [文字] — 翻译（留空则翻译剪贴板）
+/s — 总结剪贴板
+/model — 切换模型（也可点左上角模型名）
+/settings — 打开设置
+/help — 显示本帮助
+
+· 顶部模型名可随时切换服务商 / 模型
+· 选择带 👁 的视觉模型即可直接发送截图与图片"""
 
     def handle(self, text: str):
         text = text.strip()

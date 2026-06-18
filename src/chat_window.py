@@ -3,9 +3,10 @@ import time
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
     QPushButton, QLabel, QScrollArea, QFrame, QFileDialog, QStackedWidget,
+    QMenu,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, QPoint, QTimer
-from PyQt6.QtGui import QFont, QKeyEvent, QPixmap
+from PyQt6.QtGui import QFont, QKeyEvent, QPixmap, QActionGroup
 
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
@@ -136,9 +137,10 @@ class ChatWindow(QWidget):
     close_requested = pyqtSignal()
     open_settings_requested = pyqtSignal()
     conversation_selected = pyqtSignal(str)
-    conversations_panel_opened = pyqtSignal()
+    model_changed = pyqtSignal(str, str)          # provider_id, model_id
+    manage_providers_requested = pyqtSignal()
 
-    def __init__(self, width=420, height=520, opacity=0.9, position="bottom_right",
+    def __init__(self, width=440, height=560, opacity=0.9, position="bottom_right",
                  screenshot_protection=True, theme="dark"):
         super().__init__(None)
         self._width = width
@@ -150,6 +152,11 @@ class ChatWindow(QWidget):
         self._drag_pos = None
         self._bubbles: list[MessageBubble] = []
         self._current_ai_bubble: MessageBubble | None = None
+
+        # 模型选择数据
+        self._providers: list[dict] = []
+        self._active_pid: str = ""
+        self._active_mid: str = ""
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -212,39 +219,43 @@ class ChatWindow(QWidget):
         # ── Title bar ──────────────────────────────────────────────────────────
         title_bar = QFrame()
         title_bar.setObjectName("title_bar")
-        title_bar.setFixedHeight(36)
+        title_bar.setFixedHeight(42)
         title_layout = QHBoxLayout(title_bar)
-        title_layout.setContentsMargins(12, 0, 6, 0)
-        title_layout.setSpacing(2)
+        title_layout.setContentsMargins(10, 0, 6, 0)
+        title_layout.setSpacing(4)
 
         dot = QLabel("●")
         dot.setObjectName("dot")
         dot.setFont(QFont("", 8))
         title_layout.addWidget(dot)
 
-        self._title_label = QLabel("对话")
-        self._title_label.setFont(QFont("Microsoft YaHei", 10))
-        self._title_label.setObjectName("title_text")
-        title_layout.addWidget(self._title_label)
+        # 模型切换芯片：点击弹出服务商 / 模型菜单
+        self._model_btn = QPushButton("选择模型 ▾")
+        self._model_btn.setObjectName("model_chip")
+        self._model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._model_btn.setToolTip("切换服务商 / 模型")
+        self._model_btn.clicked.connect(self._open_model_menu)
+        title_layout.addWidget(self._model_btn)
+
         title_layout.addStretch()
 
-        self._convs_btn = QPushButton("≡")
-        self._convs_btn.setObjectName("title_btn")
-        self._convs_btn.setFixedSize(28, 28)
-        self._convs_btn.setToolTip("历史对话")
-        self._convs_btn.clicked.connect(self._on_convs_btn)
-        title_layout.addWidget(self._convs_btn)
+        new_btn = QPushButton("＋")
+        new_btn.setObjectName("title_btn")
+        new_btn.setFixedSize(30, 30)
+        new_btn.setToolTip("新对话")
+        new_btn.clicked.connect(lambda: self.command_entered.emit("/new"))
+        title_layout.addWidget(new_btn)
 
-        settings_btn = QPushButton("⚙")
-        settings_btn.setObjectName("title_btn")
-        settings_btn.setFixedSize(28, 28)
-        settings_btn.setToolTip("设置")
-        settings_btn.clicked.connect(self.open_settings_requested.emit)
-        title_layout.addWidget(settings_btn)
+        self._more_btn = QPushButton("⋯")
+        self._more_btn.setObjectName("title_btn")
+        self._more_btn.setFixedSize(30, 30)
+        self._more_btn.setToolTip("更多")
+        self._more_btn.clicked.connect(self._open_more_menu)
+        title_layout.addWidget(self._more_btn)
 
         close_btn = QPushButton("×")
         close_btn.setObjectName("title_btn_close")
-        close_btn.setFixedSize(28, 28)
+        close_btn.setFixedSize(30, 30)
         close_btn.clicked.connect(self.close_requested.emit)
         title_layout.addWidget(close_btn)
 
@@ -278,31 +289,34 @@ class ChatWindow(QWidget):
         # ── Input bar ──────────────────────────────────────────────────────────
         input_bar = QFrame()
         input_bar.setObjectName("input_bar")
-        input_bar.setFixedHeight(48)
+        input_bar.setFixedHeight(50)
         input_layout = QHBoxLayout(input_bar)
-        input_layout.setContentsMargins(8, 6, 8, 6)
+        input_layout.setContentsMargins(8, 7, 8, 7)
+        input_layout.setSpacing(4)
 
         attach_btn = QPushButton("📎")
         attach_btn.setObjectName("icon_btn")
         attach_btn.setFixedSize(32, 32)
+        attach_btn.setToolTip("发送文件 / 图片")
         attach_btn.clicked.connect(self._on_attach)
         input_layout.addWidget(attach_btn)
 
         screenshot_btn = QPushButton("📷")
         screenshot_btn.setObjectName("icon_btn")
         screenshot_btn.setFixedSize(32, 32)
+        screenshot_btn.setToolTip("截图提问")
         screenshot_btn.clicked.connect(self.screenshot_requested.emit)
         input_layout.addWidget(screenshot_btn)
 
         self._input = ChatInputEdit()
         self._input.setObjectName("chat_input")
-        self._input.setPlaceholderText("/help 查看可用功能")
+        self._input.setPlaceholderText("发消息，或点 ⋯ 查看功能…")
         self._input.submit.connect(self._on_send)
         input_layout.addWidget(self._input, 1)
 
         send_btn = QPushButton("发送")
         send_btn.setObjectName("send_btn")
-        send_btn.setFixedSize(50, 32)
+        send_btn.setFixedSize(52, 34)
         send_btn.clicked.connect(self._on_send)
         input_layout.addWidget(send_btn)
 
@@ -347,15 +361,8 @@ class ChatWindow(QWidget):
 
         return panel
 
-    def _on_convs_btn(self):
-        if self._stack.currentIndex() == 1:
-            self._show_chat_view()
-        else:
-            self.conversations_panel_opened.emit()
-
     def _show_chat_view(self):
         self._stack.setCurrentIndex(0)
-        self._convs_btn.setText("≡")
         QTimer.singleShot(50, self._input.setFocus)
 
     def show_conversations(self, conversations: list[dict], current_id: str = ""):
@@ -375,11 +382,128 @@ class ChatWindow(QWidget):
             self._convs_inner_layout.insertWidget(self._convs_inner_layout.count() - 1, item)
 
         self._stack.setCurrentIndex(1)
-        self._convs_btn.setText("↩")
 
     def _on_conv_selected(self, conv_id: str):
         self._show_chat_view()
         self.conversation_selected.emit(conv_id)
+
+    # ── Model switcher ──────────────────────────────────────────────────────
+
+    def set_model_options(self, providers: list[dict], active_pid: str, active_mid: str):
+        """由 app 注入可选的服务商 / 模型及当前激活项，刷新顶部芯片。"""
+        self._providers = providers or []
+        self._active_pid = active_pid or ""
+        self._active_mid = active_mid or ""
+        self._refresh_model_chip()
+
+    def _refresh_model_chip(self):
+        name, vision = "选择模型", False
+        for p in self._providers:
+            if p.get("id") == self._active_pid:
+                for m in p.get("models", []):
+                    if m.get("id") == self._active_mid:
+                        name = m.get("name") or m.get("id") or name
+                        vision = bool(m.get("vision"))
+                        break
+                break
+        label = f"👁 {name}" if vision else name
+        self._model_btn.setText(f"{label}  ▾")
+
+    def _open_model_menu(self):
+        menu = self._styled_menu()
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+
+        if not self._providers:
+            act = menu.addAction("（尚未配置服务商）")
+            act.setEnabled(False)
+        for p in self._providers:
+            menu.addSection(p.get("name") or p.get("id") or "服务商")
+            models = p.get("models", [])
+            if not models:
+                act = menu.addAction("  （无模型）")
+                act.setEnabled(False)
+                continue
+            for m in models:
+                mid = m.get("id", "")
+                label = m.get("name") or mid
+                if m.get("vision"):
+                    label = f"👁 {label}"
+                act = menu.addAction(label)
+                act.setCheckable(True)
+                act.setChecked(p.get("id") == self._active_pid and mid == self._active_mid)
+                group.addAction(act)
+                act.triggered.connect(
+                    lambda _checked, pid=p.get("id"), m_id=mid: self._on_model_picked(pid, m_id)
+                )
+
+        menu.addSeparator()
+        manage = menu.addAction("管理服务商 / 模型…")
+        manage.triggered.connect(self.manage_providers_requested.emit)
+
+        menu.exec(self._model_btn.mapToGlobal(self._model_btn.rect().bottomLeft()))
+
+    def _on_model_picked(self, pid: str, mid: str):
+        if pid == self._active_pid and mid == self._active_mid:
+            return
+        self._active_pid, self._active_mid = pid, mid
+        self._refresh_model_chip()
+        self.model_changed.emit(pid, mid)
+
+    # ── More menu (commands) ──────────────────────────────────────────────────
+
+    def _open_more_menu(self):
+        menu = self._styled_menu()
+        items = [
+            ("＋  新对话", "/new"),
+            ("🕘  历史对话", "/list"),
+            ("🧹  清空对话", "/clear"),
+            ("🗑  删除对话", "/delete"),
+            (None, None),
+            ("⬇  导出对话", "/export"),
+            ("🌐  翻译剪贴板", "/t"),
+            ("📝  总结剪贴板", "/s"),
+            (None, None),
+            ("⚙  设置", "/settings"),
+            ("❔  帮助", "/help"),
+        ]
+        for label, cmd in items:
+            if label is None:
+                menu.addSeparator()
+                continue
+            act = menu.addAction(label)
+            act.triggered.connect(lambda _checked, c=cmd: self.command_entered.emit(c))
+        menu.exec(self._more_btn.mapToGlobal(self._more_btn.rect().bottomLeft()))
+
+    def _styled_menu(self) -> QMenu:
+        menu = QMenu(self)
+        if self._theme == "dark":
+            menu.setStyleSheet("""
+                QMenu {
+                    background-color: #2b2b2b; color: #e0e0e0;
+                    border: 1px solid rgba(255,255,255,25);
+                    border-radius: 8px; padding: 5px;
+                    font-family: 'Microsoft YaHei'; font-size: 12px;
+                }
+                QMenu::item { padding: 6px 22px; border-radius: 5px; }
+                QMenu::item:selected { background-color: rgba(59,130,246,160); color: white; }
+                QMenu::item:disabled { color: #777; }
+                QMenu::separator { height: 1px; background: rgba(255,255,255,20); margin: 5px 8px; }
+            """)
+        else:
+            menu.setStyleSheet("""
+                QMenu {
+                    background-color: #ffffff; color: #333;
+                    border: 1px solid rgba(0,0,0,25);
+                    border-radius: 8px; padding: 5px;
+                    font-family: 'Microsoft YaHei'; font-size: 12px;
+                }
+                QMenu::item { padding: 6px 22px; border-radius: 5px; }
+                QMenu::item:selected { background-color: rgba(59,130,246,180); color: white; }
+                QMenu::item:disabled { color: #aaa; }
+                QMenu::separator { height: 1px; background: rgba(0,0,0,15); margin: 5px 8px; }
+            """)
+        return menu
 
     # ── Message operations ────────────────────────────────────────────────────
 
@@ -420,6 +544,7 @@ class ChatWindow(QWidget):
         label = QLabel(text)
         label.setWordWrap(True)
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setObjectName("system_msg")
         label.setStyleSheet("color: #888; font-size: 11px; padding: 4px; font-family: 'Microsoft YaHei';")
         self._message_layout.insertWidget(self._message_layout.count() - 1, label)
         self._scroll_to_bottom()
@@ -460,7 +585,7 @@ class ChatWindow(QWidget):
     # ── Window dragging ────────────────────────────────────────────────────────
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and event.position().y() < 36:
+        if event.button() == Qt.MouseButton.LeftButton and event.position().y() < 42:
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
 
@@ -492,25 +617,32 @@ class ChatWindow(QWidget):
         if self._theme == "dark":
             self.setStyleSheet("""
                 #chat_container {
-                    background-color: rgba(30, 30, 30, 240);
-                    border-radius: 12px;
-                    border: 1px solid rgba(255, 255, 255, 30);
+                    background-color: rgba(28, 28, 30, 242);
+                    border-radius: 14px;
+                    border: 1px solid rgba(255, 255, 255, 28);
                 }
                 #title_bar {
-                    background-color: rgba(40, 40, 40, 250);
-                    border-top-left-radius: 12px;
-                    border-top-right-radius: 12px;
+                    background-color: rgba(38, 38, 40, 250);
+                    border-top-left-radius: 14px;
+                    border-top-right-radius: 14px;
+                    border-bottom: 1px solid rgba(255,255,255,12);
                 }
                 #dot { color: #4CAF50; }
-                #title_text { color: #e0e0e0; }
-                #title_btn {
-                    background: transparent; color: #888;
-                    border: none; border-radius: 4px; font-size: 13px;
+                #model_chip {
+                    background: rgba(255,255,255,12); color: #e8e8e8;
+                    border: 1px solid rgba(255,255,255,22); border-radius: 8px;
+                    padding: 4px 10px; font-size: 12px; font-family: 'Microsoft YaHei';
+                    text-align: left;
                 }
-                #title_btn:hover { background: rgba(255,255,255,20); color: #ccc; }
+                #model_chip:hover { background: rgba(255,255,255,26); border-color: rgba(59,130,246,150); }
+                #title_btn {
+                    background: transparent; color: #9aa0a6;
+                    border: none; border-radius: 6px; font-size: 16px;
+                }
+                #title_btn:hover { background: rgba(255,255,255,22); color: #fff; }
                 #title_btn_close {
-                    background: transparent; color: #888;
-                    border: none; border-radius: 4px; font-size: 14px;
+                    background: transparent; color: #9aa0a6;
+                    border: none; border-radius: 6px; font-size: 16px;
                 }
                 #title_btn_close:hover { background: #c42b1c; color: white; }
                 #main_stack { background: transparent; }
@@ -521,83 +653,90 @@ class ChatWindow(QWidget):
                 }
                 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
                 #user_bubble {
-                    background-color: rgba(59, 130, 246, 180);
-                    border-radius: 10px; margin-left: 60px;
+                    background-color: rgba(59, 130, 246, 185);
+                    border-radius: 12px; margin-left: 56px;
                 }
                 #user_bubble QLabel { color: white; }
                 #user_bubble #stats_label { color: rgba(255,255,255,120); font-size: 10px; font-family: 'Consolas'; }
-                #bubble_image { border-radius: 6px; }
+                #bubble_image { border-radius: 8px; }
                 #ai_bubble {
-                    background-color: rgba(55, 55, 55, 200);
-                    border-radius: 10px; margin-right: 60px;
+                    background-color: rgba(58, 58, 62, 210);
+                    border-radius: 12px; margin-right: 56px;
                 }
-                #ai_bubble QLabel { color: #e0e0e0; }
+                #ai_bubble QLabel { color: #ececec; }
                 #ai_bubble #stats_label { color: rgba(200,200,200,120); font-size: 10px; font-family: 'Consolas'; }
                 #convs_panel { background: transparent; }
                 #convs_scroll { background: transparent; border: none; }
                 #back_btn, #new_conv_btn {
-                    background: rgba(60,60,60,180); color: #ccc;
-                    border: 1px solid rgba(255,255,255,15); border-radius: 5px;
-                    padding: 4px 10px; font-size: 11px; font-family: 'Microsoft YaHei';
+                    background: rgba(60,60,64,190); color: #ddd;
+                    border: 1px solid rgba(255,255,255,15); border-radius: 7px;
+                    padding: 5px 12px; font-size: 11px; font-family: 'Microsoft YaHei';
                 }
-                #back_btn:hover, #new_conv_btn:hover { background: rgba(80,80,80,220); }
+                #back_btn:hover, #new_conv_btn:hover { background: rgba(82,82,88,230); }
                 #panel_sep { background: rgba(255,255,255,15); max-height: 1px; }
                 #conv_item {
-                    background: rgba(50,50,50,160);
-                    border-radius: 6px;
+                    background: rgba(50,50,54,170);
+                    border-radius: 8px;
                 }
-                #conv_item:hover { background: rgba(65,65,65,200); }
+                #conv_item:hover { background: rgba(68,68,74,210); }
                 #conv_item_active {
-                    background: rgba(59,130,246,100);
-                    border-radius: 6px;
+                    background: rgba(59,130,246,95);
+                    border-radius: 8px;
                     border: 1px solid rgba(59,130,246,180);
                 }
-                #conv_title { color: #ddd; }
-                #conv_date { color: #888; }
+                #conv_title { color: #e3e3e3; }
+                #conv_date { color: #8a8a8a; }
                 #input_bar {
-                    background-color: rgba(40, 40, 40, 250);
-                    border-bottom-left-radius: 12px;
-                    border-bottom-right-radius: 12px;
-                    border-top: 1px solid rgba(255,255,255,15);
+                    background-color: rgba(38, 38, 40, 250);
+                    border-bottom-left-radius: 14px;
+                    border-bottom-right-radius: 14px;
+                    border-top: 1px solid rgba(255,255,255,12);
                 }
                 #icon_btn {
                     background: transparent; border: none;
-                    font-size: 16px; border-radius: 4px;
+                    font-size: 16px; border-radius: 6px;
                 }
-                #icon_btn:hover { background: rgba(255,255,255,20); }
+                #icon_btn:hover { background: rgba(255,255,255,22); }
                 #chat_input {
-                    background-color: rgba(60, 60, 60, 200); color: #e0e0e0;
-                    border: 1px solid rgba(255,255,255,20); border-radius: 6px;
-                    padding: 4px 8px; font-size: 13px; font-family: 'Microsoft YaHei';
+                    background-color: rgba(58, 58, 62, 210); color: #ececec;
+                    border: 1px solid rgba(255,255,255,20); border-radius: 9px;
+                    padding: 6px 10px; font-size: 13px; font-family: 'Microsoft YaHei';
                 }
-                #chat_input:focus { border: 1px solid rgba(59,130,246,150); }
+                #chat_input:focus { border: 1px solid rgba(59,130,246,160); }
                 #send_btn {
-                    background-color: rgba(59, 130, 246, 180); color: white;
-                    border: none; border-radius: 6px;
+                    background-color: rgba(59, 130, 246, 200); color: white;
+                    border: none; border-radius: 9px;
                     font-size: 12px; font-family: 'Microsoft YaHei';
                 }
-                #send_btn:hover { background-color: rgba(59, 130, 246, 220); }
+                #send_btn:hover { background-color: rgba(59, 130, 246, 240); }
             """)
         else:
             self.setStyleSheet("""
                 #chat_container {
-                    background-color: rgba(255, 255, 255, 240);
-                    border-radius: 12px; border: 1px solid rgba(0,0,0,30);
+                    background-color: rgba(252, 252, 253, 245);
+                    border-radius: 14px; border: 1px solid rgba(0,0,0,28);
                 }
                 #title_bar {
-                    background-color: rgba(245, 245, 245, 250);
-                    border-top-left-radius: 12px; border-top-right-radius: 12px;
+                    background-color: rgba(246, 246, 248, 250);
+                    border-top-left-radius: 14px; border-top-right-radius: 14px;
+                    border-bottom: 1px solid rgba(0,0,0,10);
                 }
                 #dot { color: #4CAF50; }
-                #title_text { color: #333; }
+                #model_chip {
+                    background: rgba(0,0,0,6); color: #2b2b2b;
+                    border: 1px solid rgba(0,0,0,18); border-radius: 8px;
+                    padding: 4px 10px; font-size: 12px; font-family: 'Microsoft YaHei';
+                    text-align: left;
+                }
+                #model_chip:hover { background: rgba(0,0,0,12); border-color: rgba(59,130,246,150); }
                 #title_btn {
                     background: transparent; color: #666;
-                    border: none; border-radius: 4px; font-size: 13px;
+                    border: none; border-radius: 6px; font-size: 16px;
                 }
                 #title_btn:hover { background: rgba(0,0,0,10); }
                 #title_btn_close {
                     background: transparent; color: #666;
-                    border: none; border-radius: 4px; font-size: 14px;
+                    border: none; border-radius: 6px; font-size: 16px;
                 }
                 #title_btn_close:hover { background: #c42b1c; color: white; }
                 #main_stack { background: transparent; }
@@ -608,58 +747,58 @@ class ChatWindow(QWidget):
                 }
                 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
                 #user_bubble {
-                    background-color: rgba(59, 130, 246, 200);
-                    border-radius: 10px; margin-left: 60px;
+                    background-color: rgba(59, 130, 246, 205);
+                    border-radius: 12px; margin-left: 56px;
                 }
                 #user_bubble QLabel { color: white; }
                 #user_bubble #stats_label { color: rgba(255,255,255,150); font-size: 10px; font-family: 'Consolas'; }
-                #bubble_image { border-radius: 6px; }
+                #bubble_image { border-radius: 8px; }
                 #ai_bubble {
-                    background-color: rgba(240, 240, 240, 230);
-                    border-radius: 10px; margin-right: 60px;
+                    background-color: rgba(238, 238, 240, 235);
+                    border-radius: 12px; margin-right: 56px;
                 }
-                #ai_bubble QLabel { color: #333; }
+                #ai_bubble QLabel { color: #2b2b2b; }
                 #ai_bubble #stats_label { color: rgba(0,0,0,100); font-size: 10px; font-family: 'Consolas'; }
                 #convs_panel { background: transparent; }
                 #convs_scroll { background: transparent; border: none; }
                 #back_btn, #new_conv_btn {
-                    background: rgba(230,230,230,200); color: #333;
-                    border: 1px solid rgba(0,0,0,15); border-radius: 5px;
-                    padding: 4px 10px; font-size: 11px; font-family: 'Microsoft YaHei';
+                    background: rgba(232,232,234,210); color: #333;
+                    border: 1px solid rgba(0,0,0,15); border-radius: 7px;
+                    padding: 5px 12px; font-size: 11px; font-family: 'Microsoft YaHei';
                 }
-                #back_btn:hover, #new_conv_btn:hover { background: rgba(210,210,210,255); }
+                #back_btn:hover, #new_conv_btn:hover { background: rgba(214,214,218,255); }
                 #panel_sep { background: rgba(0,0,0,12); max-height: 1px; }
                 #conv_item {
-                    background: rgba(240,240,240,180);
-                    border-radius: 6px;
+                    background: rgba(240,240,242,190);
+                    border-radius: 8px;
                 }
-                #conv_item:hover { background: rgba(220,220,220,230); }
+                #conv_item:hover { background: rgba(222,222,226,235); }
                 #conv_item_active {
-                    background: rgba(59,130,246,60);
-                    border-radius: 6px;
+                    background: rgba(59,130,246,55);
+                    border-radius: 8px;
                     border: 1px solid rgba(59,130,246,150);
                 }
-                #conv_title { color: #333; }
+                #conv_title { color: #2b2b2b; }
                 #conv_date { color: #888; }
                 #input_bar {
-                    background-color: rgba(245,245,245,250);
-                    border-bottom-left-radius: 12px; border-bottom-right-radius: 12px;
+                    background-color: rgba(246,246,248,250);
+                    border-bottom-left-radius: 14px; border-bottom-right-radius: 14px;
                     border-top: 1px solid rgba(0,0,0,10);
                 }
                 #icon_btn {
                     background: transparent; border: none;
-                    font-size: 16px; border-radius: 4px;
+                    font-size: 16px; border-radius: 6px;
                 }
                 #icon_btn:hover { background: rgba(0,0,0,10); }
                 #chat_input {
-                    background-color: white; color: #333;
-                    border: 1px solid rgba(0,0,0,15); border-radius: 6px;
-                    padding: 4px 8px; font-size: 13px; font-family: 'Microsoft YaHei';
+                    background-color: white; color: #2b2b2b;
+                    border: 1px solid rgba(0,0,0,15); border-radius: 9px;
+                    padding: 6px 10px; font-size: 13px; font-family: 'Microsoft YaHei';
                 }
                 #chat_input:focus { border: 1px solid rgba(59,130,246,150); }
                 #send_btn {
-                    background-color: rgba(59,130,246,200); color: white;
-                    border: none; border-radius: 6px;
+                    background-color: rgba(59,130,246,210); color: white;
+                    border: none; border-radius: 9px;
                     font-size: 12px; font-family: 'Microsoft YaHei';
                 }
                 #send_btn:hover { background-color: rgba(59,130,246,255); }
