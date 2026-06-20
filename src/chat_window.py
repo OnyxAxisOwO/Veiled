@@ -5,8 +5,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QScrollArea, QFrame, QFileDialog, QStackedWidget,
     QMenu,
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, QPoint, QTimer
-from PyQt6.QtGui import QFont, QKeyEvent, QPixmap, QActionGroup
+from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, QPoint, QTimer, QSize
+from PyQt6.QtGui import QFont, QKeyEvent, QPixmap, QActionGroup, QPainter
 
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
@@ -129,6 +129,71 @@ class ConvItem(QFrame):
             self.clicked.emit(self._conv_id)
 
 
+class ChatContainer(QFrame):
+    """Container frame for the chat window. The themed (translucent) background is
+    painted by the QSS #chat_container rule; on top of it, in the message-area
+    region, this paints the optional user background image. DPI-aware so the image
+    stays crisp on scaled displays."""
+
+    _TITLE_H = 42
+    _INPUT_H = 50
+
+    def __init__(self, parent=None, theme: str = "dark"):
+        super().__init__(parent)
+        self._theme = theme
+        self._bg_pixmap: QPixmap | None = None
+        self._bg_fill_mode = "fill"
+
+    def set_theme(self, theme: str):
+        self._theme = theme
+        self.update()
+
+    def set_background(self, pixmap: "QPixmap | None", fill_mode: str = "fill"):
+        self._bg_pixmap = pixmap
+        self._bg_fill_mode = fill_mode
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)  # QSS rounded themed background + border
+        pm = self._bg_pixmap
+        if not pm or pm.isNull():
+            return
+        r = self.rect().adjusted(0, self._TITLE_H, 0, -self._INPUT_H)
+        if r.width() <= 0 or r.height() <= 0:
+            return
+
+        dpr = self.devicePixelRatioF()
+        painter = QPainter(self)
+        painter.setClipRect(r)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        mode = self._bg_fill_mode
+
+        def _centered(img: QPixmap):
+            lw, lh = img.width() / dpr, img.height() / dpr
+            painter.drawPixmap(QPoint(int(r.x() + (r.width() - lw) / 2),
+                                      int(r.y() + (r.height() - lh) / 2)), img)
+
+        if mode in ("fill", "fit", "stretch"):
+            target = QSize(max(1, round(r.width() * dpr)), max(1, round(r.height() * dpr)))
+            am = {
+                "fill": Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                "fit": Qt.AspectRatioMode.KeepAspectRatio,
+                "stretch": Qt.AspectRatioMode.IgnoreAspectRatio,
+            }[mode]
+            scaled = pm.scaled(target, am, Qt.TransformationMode.SmoothTransformation)
+            scaled.setDevicePixelRatio(dpr)
+            _centered(scaled)
+        elif mode == "tile":
+            tile = QPixmap(pm)
+            tile.setDevicePixelRatio(dpr)
+            painter.drawTiledPixmap(r, tile)
+        else:  # center
+            disp = QPixmap(pm)
+            disp.setDevicePixelRatio(dpr)
+            _centered(disp)
+        painter.end()
+
+
 class ChatWindow(QWidget):
     message_sent = pyqtSignal(str)
     file_sent = pyqtSignal(str)
@@ -210,8 +275,9 @@ class ChatWindow(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        container = QFrame(self)
+        container = ChatContainer(self, theme=self._theme)
         container.setObjectName("chat_container")
+        self._container = container
         container_layout = QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(0)
@@ -264,6 +330,7 @@ class ChatWindow(QWidget):
         # ── Stacked area: messages / conversations panel ───────────────────────
         self._stack = QStackedWidget()
         self._stack.setObjectName("main_stack")
+        self._stack.setAutoFillBackground(False)
 
         # Page 0: message scroll area
         self._scroll_area = QScrollArea()
@@ -271,12 +338,19 @@ class ChatWindow(QWidget):
         self._scroll_area.setWidgetResizable(True)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
+        self._scroll_area.setAutoFillBackground(False)
+
         self._message_container = QWidget()
         self._message_layout = QVBoxLayout(self._message_container)
         self._message_layout.setContentsMargins(10, 10, 10, 10)
         self._message_layout.setSpacing(8)
         self._message_layout.addStretch()
         self._scroll_area.setWidget(self._message_container)
+        # NB: QScrollArea.setWidget() re-enables autoFillBackground on the widget,
+        # so this must come AFTER setWidget or the opaque palette fill hides the
+        # container's background image.
+        self._message_container.setAutoFillBackground(False)
+        self._scroll_area.viewport().setAutoFillBackground(False)
 
         self._stack.addWidget(self._scroll_area)
 
@@ -351,12 +425,14 @@ class ChatWindow(QWidget):
         self._convs_scroll.setObjectName("convs_scroll")
         self._convs_scroll.setWidgetResizable(True)
         self._convs_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._convs_scroll.viewport().setAutoFillBackground(False)
         self._convs_inner = QWidget()
         self._convs_inner_layout = QVBoxLayout(self._convs_inner)
         self._convs_inner_layout.setContentsMargins(0, 0, 0, 0)
         self._convs_inner_layout.setSpacing(4)
         self._convs_inner_layout.addStretch()
         self._convs_scroll.setWidget(self._convs_inner)
+        self._convs_inner.setAutoFillBackground(False)  # after setWidget; see message scroll note
         layout.addWidget(self._convs_scroll, 1)
 
         return panel
@@ -645,8 +721,8 @@ class ChatWindow(QWidget):
                     border: none; border-radius: 6px; font-size: 16px;
                 }
                 #title_btn_close:hover { background: #c42b1c; color: white; }
-                #main_stack { background: transparent; }
-                #message_area { background: transparent; border: none; }
+                #main_stack { }
+                #message_area { border: none; }
                 QScrollBar:vertical { width: 6px; background: transparent; }
                 QScrollBar::handle:vertical {
                     background: rgba(255,255,255,40); border-radius: 3px; min-height: 20px;
@@ -665,8 +741,8 @@ class ChatWindow(QWidget):
                 }
                 #ai_bubble QLabel { color: #ececec; }
                 #ai_bubble #stats_label { color: rgba(200,200,200,120); font-size: 10px; font-family: 'Consolas'; }
-                #convs_panel { background: transparent; }
-                #convs_scroll { background: transparent; border: none; }
+                #convs_panel { }
+                #convs_scroll { border: none; }
                 #back_btn, #new_conv_btn {
                     background: rgba(60,60,64,190); color: #ddd;
                     border: 1px solid rgba(255,255,255,15); border-radius: 7px;
@@ -739,8 +815,8 @@ class ChatWindow(QWidget):
                     border: none; border-radius: 6px; font-size: 16px;
                 }
                 #title_btn_close:hover { background: #c42b1c; color: white; }
-                #main_stack { background: transparent; }
-                #message_area { background: transparent; border: none; }
+                #main_stack { }
+                #message_area { border: none; }
                 QScrollBar:vertical { width: 6px; background: transparent; }
                 QScrollBar::handle:vertical {
                     background: rgba(0,0,0,30); border-radius: 3px; min-height: 20px;
@@ -759,8 +835,8 @@ class ChatWindow(QWidget):
                 }
                 #ai_bubble QLabel { color: #2b2b2b; }
                 #ai_bubble #stats_label { color: rgba(0,0,0,100); font-size: 10px; font-family: 'Consolas'; }
-                #convs_panel { background: transparent; }
-                #convs_scroll { background: transparent; border: none; }
+                #convs_panel { }
+                #convs_scroll { border: none; }
                 #back_btn, #new_conv_btn {
                     background: rgba(232,232,234,210); color: #333;
                     border: 1px solid rgba(0,0,0,15); border-radius: 7px;
@@ -803,3 +879,15 @@ class ChatWindow(QWidget):
                 }
                 #send_btn:hover { background-color: rgba(59,130,246,255); }
             """)
+
+    def set_background(self, path: str, fill_mode: str = "fill"):
+        if path:
+            pm = QPixmap(path)
+            self._container.set_background(None if pm.isNull() else pm, fill_mode)
+        else:
+            self._container.set_background(None, fill_mode)
+
+    def set_theme(self, theme: str):
+        self._theme = theme
+        self._container.set_theme(theme)
+        self._apply_style()

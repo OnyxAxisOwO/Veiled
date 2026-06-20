@@ -28,6 +28,9 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("DAHService")
     app.setQuitOnLastWindowClosed(False)
+    # 用 Fusion 风格，避免 Windows 原生风格按系统深/浅色给滚动区等控件上色，
+    # 导致浅色主题下窗口里仍透出系统深色。具体调色板在 VeiledApp 里按主题应用。
+    app.setStyle("Fusion")
 
     from .app import VeiledApp
     veiled = VeiledApp()

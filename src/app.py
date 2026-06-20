@@ -23,7 +23,11 @@ class VeiledApp(QObject):
         self._config = Config()
         self._db = Database(self._config.db_path)
 
+        from .theme import apply_theme
+        apply_theme(QApplication.instance(), self._config.get("display.theme", "dark"))
+
         self._chat_window: ChatWindow | None = None
+        self._chat_struct: tuple | None = None   # 窗口结构性参数签名，变化时才重建窗口
         self._settings_panel: SettingsPanel | None = None
         self._screenshot_overlay: ScreenshotOverlay | None = None
         self._current_worker: ApiWorker | None = None
@@ -135,8 +139,20 @@ class VeiledApp(QObject):
         if self._chat_window and self._chat_window.isVisible():
             self._chat_window.hide()
 
+    def _chat_struct_sig(self) -> tuple:
+        """对话窗的结构性参数（只有这些变化才需要重建窗口；主题/背景可原地切换）。"""
+        c = self._config
+        return (
+            c.get("display.chat_width", 420),
+            c.get("display.chat_height", 520),
+            c.get("display.chat_opacity", 0.9),
+            c.get("display.chat_position", "bottom_right"),
+            c.get("display.screenshot_protection", True),
+        )
+
     def _create_chat_window(self):
         c = self._config
+        self._chat_struct = self._chat_struct_sig()
         self._chat_window = ChatWindow(
             width=c.get("display.chat_width", 420),
             height=c.get("display.chat_height", 520),
@@ -157,6 +173,10 @@ class VeiledApp(QObject):
 
         provs, active_pid, active_mid = self._model_options()
         self._chat_window.set_model_options(provs, active_pid, active_mid)
+        bg_path = c.get("display.bg_image_path", "")
+        bg_mode = c.get("display.bg_fill_mode", "fill")
+        if bg_path:
+            self._chat_window.set_background(bg_path, bg_mode)
 
         for msg in self._messages:
             if msg["role"] == "user":
@@ -463,9 +483,26 @@ class VeiledApp(QObject):
             self._tray.show()
         else:
             self._tray.hide()
+        new_theme = self._config.get("display.theme", "dark")
+        from .theme import apply_theme
+        apply_theme(QApplication.instance(), new_theme)
+        if self._settings_panel:
+            self._settings_panel._apply_style()
+
         if self._chat_window:
-            self._chat_window.hide()
-            self._chat_window = None
+            # 主题与背景图原地切换，不销毁窗口（保留滚动位置/进行中的回复）
+            self._chat_window.set_theme(new_theme)
+            self._chat_window.set_background(
+                self._config.get("display.bg_image_path", ""),
+                self._config.get("display.bg_fill_mode", "fill"),
+            )
+            # 仅当尺寸/位置/不透明度/截屏保护等结构性参数变化时才重建窗口
+            if self._chat_struct_sig() != self._chat_struct:
+                was_visible = self._chat_window.isVisible()
+                self._chat_window.hide()
+                self._chat_window = None
+                if was_visible:
+                    self._show_chat()
 
     def _new_conversation(self):
         self._current_conv_id = self._db.create_conversation(self._config.api_model)

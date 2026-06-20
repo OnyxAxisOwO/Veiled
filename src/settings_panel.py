@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QPixmap
 
 from .config import (
     Config, KIND_MAP, POSITION_MAP, DISGUISE_MAP,
@@ -67,6 +67,7 @@ class SettingsPanel(QWidget):
         hwnd = int(self.winId())
         ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)
         self._load_values()
+        self._apply_style()
 
     def closeEvent(self, event):
         event.ignore()
@@ -117,6 +118,7 @@ class SettingsPanel(QWidget):
 
         self._pages = QStackedWidget()
         self._pages.setObjectName("pages")
+        self._pages.setAutoFillBackground(False)
         self._pages.addWidget(self._create_providers_page())
         self._pages.addWidget(self._create_vision_page())
         self._pages.addWidget(self._create_hotkey_page())
@@ -157,6 +159,7 @@ class SettingsPanel(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(inner)
+        scroll.viewport().setAutoFillBackground(False)
         return scroll
 
     def _on_nav_changed(self, row: int):
@@ -729,6 +732,29 @@ class SettingsPanel(QWidget):
         self._s_theme.addItems(["深色", "浅色"])
         layout.addWidget(self._s_theme)
 
+        layout.addWidget(self._hline())
+
+        layout.addWidget(QLabel("自定义背景图片:"))
+        bg_row = QHBoxLayout()
+        self._s_bg_path = QLineEdit()
+        self._s_bg_path.setPlaceholderText("选择图片文件…")
+        self._s_bg_path.setReadOnly(True)
+        browse_bg = QPushButton("浏览")
+        browse_bg.setObjectName("mini_btn")
+        browse_bg.clicked.connect(self._browse_bg_image)
+        clear_bg = QPushButton("清除")
+        clear_bg.setObjectName("mini_btn")
+        clear_bg.clicked.connect(lambda: self._s_bg_path.clear())
+        bg_row.addWidget(self._s_bg_path, 1)
+        bg_row.addWidget(browse_bg)
+        bg_row.addWidget(clear_bg)
+        layout.addLayout(bg_row)
+
+        layout.addWidget(QLabel("背景填充方式:"))
+        self._s_bg_mode = QComboBox()
+        self._s_bg_mode.addItems(["填充", "适应", "拉伸", "平铺", "居中"])
+        layout.addWidget(self._s_bg_mode)
+
         layout.addStretch()
         return self._scrollable(inner)
 
@@ -805,7 +831,7 @@ class SettingsPanel(QWidget):
         layout.setContentsMargins(18, 16, 18, 16)
         layout.addStretch()
         layout.addWidget(QLabel("Windows Display Adapter Helper"))
-        layout.addWidget(QLabel("版本 1.1.0"))
+        layout.addWidget(QLabel("版本 1.6.0"))
         layout.addStretch()
         return inner
 
@@ -843,6 +869,9 @@ class SettingsPanel(QWidget):
         self._s_ss_toast.setChecked(c.get("display.screenshot_success_toast", True))
         self._s_ss_text.setText(c.get("display.screenshot_success_text", "成功"))
         self._s_theme.setCurrentText("深色" if c.get("display.theme", "dark") == "dark" else "浅色")
+        self._s_bg_path.setText(c.get("display.bg_image_path", ""))
+        _bg_mode_map = {"fill": "填充", "fit": "适应", "stretch": "拉伸", "tile": "平铺", "center": "居中"}
+        self._s_bg_mode.setCurrentText(_bg_mode_map.get(c.get("display.bg_fill_mode", "fill"), "填充"))
 
         self._s_screenshot_protect.setChecked(c.get("display.screenshot_protection", True))
         self._s_retention.setText(str(c.get("privacy.history_retention_days", 0)))
@@ -929,6 +958,9 @@ class SettingsPanel(QWidget):
         c.set("display.screenshot_success_toast", self._s_ss_toast.isChecked())
         c.set("display.screenshot_success_text", self._s_ss_text.text().strip() or "成功")
         c.set("display.theme", "dark" if self._s_theme.currentText() == "深色" else "light")
+        c.set("display.bg_image_path", self._s_bg_path.text().strip())
+        _bg_mode_inv = {"填充": "fill", "适应": "fit", "拉伸": "stretch", "平铺": "tile", "居中": "center"}
+        c.set("display.bg_fill_mode", _bg_mode_inv.get(self._s_bg_mode.currentText(), "fill"))
 
         c.set("display.screenshot_protection", self._s_screenshot_protect.isChecked())
         try:
@@ -951,9 +983,13 @@ class SettingsPanel(QWidget):
         self._on_close()
 
     def _export_config(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "导出配置", "adapter_config.json", "JSON 文件 (*.json)"
-        )
+        self._set_topmost(False)
+        try:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "导出配置", "adapter_config.json", "JSON 文件 (*.json)"
+            )
+        finally:
+            self._set_topmost(True)
         if not path:
             return
         try:
@@ -969,7 +1005,11 @@ class SettingsPanel(QWidget):
         )
 
     def _import_config(self):
-        path, _ = QFileDialog.getOpenFileName(self, "导入配置", "", "JSON 文件 (*.json)")
+        self._set_topmost(False)
+        try:
+            path, _ = QFileDialog.getOpenFileName(self, "导入配置", "", "JSON 文件 (*.json)")
+        finally:
+            self._set_topmost(True)
         if not path:
             return
         if QMessageBox.question(
@@ -985,11 +1025,41 @@ class SettingsPanel(QWidget):
             QMessageBox.warning(self, "导入失败", f"无法解析配置文件：\n{e}")
             return
         self._load_values()
+        self._apply_style()
         self.settings_changed.emit()
         QMessageBox.information(
             self, "导入成功",
             "配置已导入并保存。\n热键等部分设置可能需要重启应用后生效。"
         )
+
+    def _set_topmost(self, on: bool):
+        """临时取消/恢复窗口置顶。本面板是无边框 + 置顶 + Tool 窗口，原生文件对话框
+        会被它压在下面，看起来像「点了没反应」，开对话框前先放下置顶即可。"""
+        try:
+            hwnd = int(self.winId())
+            HWND_TOPMOST, HWND_NOTOPMOST = -1, -2
+            SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE = 0x0002, 0x0001, 0x0010
+            ctypes.windll.user32.SetWindowPos(
+                hwnd, HWND_TOPMOST if on else HWND_NOTOPMOST,
+                0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+        except Exception:
+            pass
+
+    def _browse_bg_image(self):
+        self._set_topmost(False)
+        try:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "选择背景图片", "", "图片文件 (*.png *.jpg *.jpeg *.bmp *.webp *.gif)"
+            )
+        finally:
+            self._set_topmost(True)
+        if not path:
+            return
+        if QPixmap(path).isNull():
+            QMessageBox.warning(self, "无法加载图片",
+                                "这张图片无法解码，可能格式不受支持或文件已损坏。\n请换一张 PNG / JPG 图片。")
+            return
+        self._s_bg_path.setText(path)
 
     def _on_close(self):
         self.hide()
@@ -1014,108 +1084,213 @@ class SettingsPanel(QWidget):
     # ── 样式 ──────────────────────────────────────────────────────────────────
 
     def _apply_style(self):
-        self.setStyleSheet("""
-            #settings_container {
-                background-color: rgba(32, 32, 34, 248);
-                border-radius: 12px;
-                border: 1px solid rgba(255,255,255,28);
-            }
-            #settings_titlebar {
-                background: rgba(40,40,42,250);
-                border-top-left-radius: 12px; border-top-right-radius: 12px;
-                border-bottom: 1px solid rgba(255,255,255,12);
-            }
-            #settings_title { color: #ececec; }
-            #close_btn {
-                background: transparent; color: #999;
-                border: none; border-radius: 6px; font-size: 18px;
-            }
-            #close_btn:hover { background: #c42b1c; color: white; }
-            #settings_footer {
-                background: rgba(40,40,42,250);
-                border-bottom-left-radius: 12px; border-bottom-right-radius: 12px;
-                border-top: 1px solid rgba(255,255,255,12);
-            }
-            #nav_list {
-                background: rgba(26,26,28,250);
-                border: none; outline: none;
-                border-bottom-left-radius: 12px;
-                padding: 8px 6px;
-                font-family: 'Microsoft YaHei'; font-size: 12px;
-            }
-            #nav_list::item {
-                color: #b0b0b0; padding: 9px 12px; border-radius: 7px; margin: 2px 2px;
-            }
-            #nav_list::item:selected { background: rgba(59,130,246,180); color: white; }
-            #nav_list::item:hover:!selected { background: rgba(255,255,255,16); color: #e0e0e0; }
-            #pages { background: transparent; }
-            #page_hint { color: #8a8a8a; font-size: 11px; }
-            #section_label { color: #cfcfcf; font-size: 12px; font-weight: bold; }
-            #fetch_status { font-size: 11px; }
-            #hline { background: rgba(255,255,255,15); max-height: 1px; border: none; }
-            QLabel { color: #ccc; font-size: 12px; }
-            #sub_list {
-                background: rgba(48,48,52,200); color: #e0e0e0;
-                border: 1px solid rgba(255,255,255,18); border-radius: 7px;
-                outline: none; font-size: 12px; font-family: 'Microsoft YaHei';
-            }
-            #sub_list::item { padding: 6px 8px; border-radius: 5px; }
-            #sub_list::item:selected { background: rgba(59,130,246,170); color: white; }
-            #sub_list::item:hover:!selected { background: rgba(255,255,255,14); }
-            QLineEdit, QComboBox {
-                background: rgba(50,50,54,210);
-                color: #e8e8e8;
-                border: 1px solid rgba(255,255,255,20);
-                border-radius: 7px;
-                padding: 6px 9px;
-                font-size: 12px;
-            }
-            QLineEdit:focus, QComboBox:focus { border-color: rgba(59,130,246,160); }
-            QLineEdit:disabled, QComboBox:disabled, QTextEdit:disabled { color: #666; }
-            QTextEdit {
-                background: rgba(50,50,54,210);
-                color: #e8e8e8;
-                border: 1px solid rgba(255,255,255,20);
-                border-radius: 7px;
-                font-size: 12px;
-            }
-            QCheckBox { color: #ccc; spacing: 6px; }
-            QCheckBox::indicator {
-                width: 16px; height: 16px;
-                border: 1px solid rgba(255,255,255,30);
-                border-radius: 4px;
-                background: rgba(50,50,54,210);
-            }
-            QCheckBox::indicator:checked { background: #3b82f6; border-color: #3b82f6; }
-            QSlider::groove:horizontal { height: 4px; background: rgba(255,255,255,20); border-radius: 2px; }
-            QSlider::handle:horizontal {
-                width: 14px; height: 14px; margin: -5px 0;
-                background: #3b82f6; border-radius: 7px;
-            }
-            #mini_btn {
-                padding: 5px 12px;
-                background: rgba(255,255,255,14); color: #d8d8d8;
-                border: 1px solid rgba(255,255,255,22); border-radius: 6px; font-size: 11px;
-            }
-            #mini_btn:hover { background: rgba(59,130,246,140); color: white; border-color: rgba(59,130,246,160); }
-            #save_btn {
-                padding: 8px 28px;
-                background: #3b82f6; color: white;
-                border: none; border-radius: 8px; font-size: 12px;
-            }
-            #save_btn:hover { background: #2f6fe0; }
-            #io_btn {
-                padding: 8px 16px;
-                background: rgba(255,255,255,12); color: #d0d0d0;
-                border: 1px solid rgba(255,255,255,20); border-radius: 8px; font-size: 12px;
-            }
-            #io_btn:hover { background: rgba(255,255,255,24); color: #fff; }
-            QComboBox QAbstractItemView {
-                background: #2d2d2f; color: #e0e0e0;
-                selection-background-color: rgba(59,130,246,180);
-                border: 1px solid #404044;
-            }
-            QScrollBar:vertical { width: 7px; background: transparent; }
-            QScrollBar::handle:vertical { background: rgba(255,255,255,40); border-radius: 3px; min-height: 22px; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
-        """)
+        if self._config.get("display.theme", "dark") == "light":
+            self.setStyleSheet("""
+                #settings_container {
+                    background-color: rgba(252, 252, 253, 248);
+                    border-radius: 12px;
+                    border: 1px solid rgba(0,0,0,28);
+                }
+                #settings_titlebar {
+                    background: rgba(246, 246, 248, 250);
+                    border-top-left-radius: 12px; border-top-right-radius: 12px;
+                    border-bottom: 1px solid rgba(0,0,0,10);
+                }
+                #settings_title { color: #2b2b2b; }
+                #close_btn {
+                    background: transparent; color: #888;
+                    border: none; border-radius: 6px; font-size: 18px;
+                }
+                #close_btn:hover { background: #c42b1c; color: white; }
+                #settings_footer {
+                    background: rgba(246, 246, 248, 250);
+                    border-bottom-left-radius: 12px; border-bottom-right-radius: 12px;
+                    border-top: 1px solid rgba(0,0,0,10);
+                }
+                #nav_list {
+                    background: rgba(236, 236, 240, 250);
+                    border: none; outline: none;
+                    border-bottom-left-radius: 12px;
+                    padding: 8px 6px;
+                    font-family: 'Microsoft YaHei'; font-size: 12px;
+                }
+                #nav_list::item {
+                    color: #555; padding: 9px 12px; border-radius: 7px; margin: 2px 2px;
+                }
+                #nav_list::item:selected { background: rgba(59,130,246,160); color: white; }
+                #nav_list::item:hover:!selected { background: rgba(0,0,0,8); color: #333; }
+                #page_hint { color: #999; font-size: 11px; }
+                #section_label { color: #444; font-size: 12px; font-weight: bold; }
+                #fetch_status { font-size: 11px; }
+                #hline { background: rgba(0,0,0,12); max-height: 1px; border: none; }
+                QLabel { color: #555; font-size: 12px; }
+                #sub_list {
+                    background: rgba(246, 246, 248, 220); color: #333;
+                    border: 1px solid rgba(0,0,0,15); border-radius: 7px;
+                    outline: none; font-size: 12px; font-family: 'Microsoft YaHei';
+                }
+                #sub_list::item { padding: 6px 8px; border-radius: 5px; }
+                #sub_list::item:selected { background: rgba(59,130,246,150); color: white; }
+                #sub_list::item:hover:!selected { background: rgba(0,0,0,8); }
+                QLineEdit, QComboBox {
+                    background: white;
+                    color: #333;
+                    border: 1px solid rgba(0,0,0,15);
+                    border-radius: 7px;
+                    padding: 6px 9px;
+                    font-size: 12px;
+                }
+                QLineEdit:focus, QComboBox:focus { border-color: rgba(59,130,246,150); }
+                QLineEdit:disabled, QComboBox:disabled, QTextEdit:disabled { color: #aaa; }
+                QTextEdit {
+                    background: white;
+                    color: #333;
+                    border: 1px solid rgba(0,0,0,15);
+                    border-radius: 7px;
+                    font-size: 12px;
+                }
+                QCheckBox { color: #555; spacing: 6px; }
+                QCheckBox::indicator {
+                    width: 16px; height: 16px;
+                    border: 1px solid rgba(0,0,0,20);
+                    border-radius: 4px;
+                    background: white;
+                }
+                QCheckBox::indicator:checked { background: #3b82f6; border-color: #3b82f6; }
+                QSlider::groove:horizontal { height: 4px; background: rgba(0,0,0,15); border-radius: 2px; }
+                QSlider::handle:horizontal {
+                    width: 14px; height: 14px; margin: -5px 0;
+                    background: #3b82f6; border-radius: 7px;
+                }
+                #mini_btn {
+                    padding: 5px 12px;
+                    background: rgba(0,0,0,7); color: #555;
+                    border: 1px solid rgba(0,0,0,15); border-radius: 6px; font-size: 11px;
+                }
+                #mini_btn:hover { background: rgba(59,130,246,120); color: white; border-color: rgba(59,130,246,150); }
+                #save_btn {
+                    padding: 8px 28px;
+                    background: #3b82f6; color: white;
+                    border: none; border-radius: 8px; font-size: 12px;
+                }
+                #save_btn:hover { background: #2f6fe0; }
+                #io_btn {
+                    padding: 8px 16px;
+                    background: rgba(0,0,0,7); color: #555;
+                    border: 1px solid rgba(0,0,0,15); border-radius: 8px; font-size: 12px;
+                }
+                #io_btn:hover { background: rgba(0,0,0,14); color: #333; }
+                QComboBox QAbstractItemView {
+                    background: white; color: #333;
+                    selection-background-color: rgba(59,130,246,160);
+                    border: 1px solid rgba(0,0,0,15);
+                }
+                QScrollBar:vertical { width: 7px; background: transparent; }
+                QScrollBar::handle:vertical { background: rgba(0,0,0,25); border-radius: 3px; min-height: 22px; }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+            """)
+        else:
+            self.setStyleSheet("""
+                #settings_container {
+                    background-color: rgba(32, 32, 34, 248);
+                    border-radius: 12px;
+                    border: 1px solid rgba(255,255,255,28);
+                }
+                #settings_titlebar {
+                    background: rgba(40,40,42,250);
+                    border-top-left-radius: 12px; border-top-right-radius: 12px;
+                    border-bottom: 1px solid rgba(255,255,255,12);
+                }
+                #settings_title { color: #ececec; }
+                #close_btn {
+                    background: transparent; color: #999;
+                    border: none; border-radius: 6px; font-size: 18px;
+                }
+                #close_btn:hover { background: #c42b1c; color: white; }
+                #settings_footer {
+                    background: rgba(40,40,42,250);
+                    border-bottom-left-radius: 12px; border-bottom-right-radius: 12px;
+                    border-top: 1px solid rgba(255,255,255,12);
+                }
+                #nav_list {
+                    background: rgba(26,26,28,250);
+                    border: none; outline: none;
+                    border-bottom-left-radius: 12px;
+                    padding: 8px 6px;
+                    font-family: 'Microsoft YaHei'; font-size: 12px;
+                }
+                #nav_list::item {
+                    color: #b0b0b0; padding: 9px 12px; border-radius: 7px; margin: 2px 2px;
+                }
+                #nav_list::item:selected { background: rgba(59,130,246,180); color: white; }
+                #nav_list::item:hover:!selected { background: rgba(255,255,255,16); color: #e0e0e0; }
+                #page_hint { color: #8a8a8a; font-size: 11px; }
+                #section_label { color: #cfcfcf; font-size: 12px; font-weight: bold; }
+                #fetch_status { font-size: 11px; }
+                #hline { background: rgba(255,255,255,15); max-height: 1px; border: none; }
+                QLabel { color: #ccc; font-size: 12px; }
+                #sub_list {
+                    background: rgba(48,48,52,200); color: #e0e0e0;
+                    border: 1px solid rgba(255,255,255,18); border-radius: 7px;
+                    outline: none; font-size: 12px; font-family: 'Microsoft YaHei';
+                }
+                #sub_list::item { padding: 6px 8px; border-radius: 5px; }
+                #sub_list::item:selected { background: rgba(59,130,246,170); color: white; }
+                #sub_list::item:hover:!selected { background: rgba(255,255,255,14); }
+                QLineEdit, QComboBox {
+                    background: rgba(50,50,54,210);
+                    color: #e8e8e8;
+                    border: 1px solid rgba(255,255,255,20);
+                    border-radius: 7px;
+                    padding: 6px 9px;
+                    font-size: 12px;
+                }
+                QLineEdit:focus, QComboBox:focus { border-color: rgba(59,130,246,160); }
+                QLineEdit:disabled, QComboBox:disabled, QTextEdit:disabled { color: #666; }
+                QTextEdit {
+                    background: rgba(50,50,54,210);
+                    color: #e8e8e8;
+                    border: 1px solid rgba(255,255,255,20);
+                    border-radius: 7px;
+                    font-size: 12px;
+                }
+                QCheckBox { color: #ccc; spacing: 6px; }
+                QCheckBox::indicator {
+                    width: 16px; height: 16px;
+                    border: 1px solid rgba(255,255,255,30);
+                    border-radius: 4px;
+                    background: rgba(50,50,54,210);
+                }
+                QCheckBox::indicator:checked { background: #3b82f6; border-color: #3b82f6; }
+                QSlider::groove:horizontal { height: 4px; background: rgba(255,255,255,20); border-radius: 2px; }
+                QSlider::handle:horizontal {
+                    width: 14px; height: 14px; margin: -5px 0;
+                    background: #3b82f6; border-radius: 7px;
+                }
+                #mini_btn {
+                    padding: 5px 12px;
+                    background: rgba(255,255,255,14); color: #d8d8d8;
+                    border: 1px solid rgba(255,255,255,22); border-radius: 6px; font-size: 11px;
+                }
+                #mini_btn:hover { background: rgba(59,130,246,140); color: white; border-color: rgba(59,130,246,160); }
+                #save_btn {
+                    padding: 8px 28px;
+                    background: #3b82f6; color: white;
+                    border: none; border-radius: 8px; font-size: 12px;
+                }
+                #save_btn:hover { background: #2f6fe0; }
+                #io_btn {
+                    padding: 8px 16px;
+                    background: rgba(255,255,255,12); color: #d0d0d0;
+                    border: 1px solid rgba(255,255,255,20); border-radius: 8px; font-size: 12px;
+                }
+                #io_btn:hover { background: rgba(255,255,255,24); color: #fff; }
+                QComboBox QAbstractItemView {
+                    background: #2d2d2f; color: #e0e0e0;
+                    selection-background-color: rgba(59,130,246,180);
+                    border: 1px solid #404044;
+                }
+                QScrollBar:vertical { width: 7px; background: transparent; }
+                QScrollBar::handle:vertical { background: rgba(255,255,255,40); border-radius: 3px; min-height: 22px; }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
+            """)
