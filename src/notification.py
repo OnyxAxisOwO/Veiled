@@ -22,7 +22,20 @@ class NotificationManager(QObject):
         super().__init__()
         self._disguise = disguise
         self._tray: QSystemTrayIcon | None = None
+        self._owns_tray = False
         self._pending_text = ""
+
+    def set_tray(self, tray: "QSystemTrayIcon | None"):
+        """复用外部（菜单）托盘图标弹通知，避免出现第二个托盘图标。"""
+        if tray is None or tray is self._tray:
+            return
+        self._tray = tray
+        self._owns_tray = False
+        try:
+            tray.messageClicked.connect(self._on_clicked)
+        except Exception:
+            pass
+        tray.setIcon(self._get_icon())
 
     def set_disguise(self, disguise: str):
         self._disguise = disguise
@@ -33,6 +46,7 @@ class NotificationManager(QObject):
         if self._tray is None:
             app = QApplication.instance()
             self._tray = QSystemTrayIcon(app)
+            self._owns_tray = True
             self._tray.messageClicked.connect(self._on_clicked)
             self._tray.setToolTip("Display Adapter Helper")
             self._tray.setIcon(self._get_icon())
@@ -74,9 +88,12 @@ class NotificationManager(QObject):
         self._tray.showMessage(title, display_text, QSystemTrayIcon.MessageIcon.NoIcon, 5000)
 
     def hide(self):
-        if self._tray:
+        # 仅在自己创建的托盘上才销毁；共享的菜单托盘交由 TrayManager 管理，
+        # 这样 boss key 隐藏通知时不会连带把常驻的菜单图标也一起隐藏。
+        if self._tray is not None and self._owns_tray:
             self._tray.hide()
             self._tray = None
+            self._owns_tray = False
 
     def _on_clicked(self):
         self.notification_clicked.emit()

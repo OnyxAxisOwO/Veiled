@@ -695,8 +695,14 @@ class SettingsPanel(QWidget):
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(9)
 
-        self._s_tray = QCheckBox("显示系统托盘图标")
-        layout.addWidget(self._s_tray)
+        layout.addWidget(QLabel("托盘菜单样式:"))
+        self._s_menu_style = QComboBox()
+        self._s_menu_style.addItems(["原生 Windows 菜单（更隐蔽）", "样式菜单（深色 / 带输入框）"])
+        layout.addWidget(self._s_menu_style)
+        hint = QLabel("原生菜单与系统服务一致、最不显眼，但无法内嵌输入框；\n提问用「截图 / 截全图 / 剪贴板提问」。样式菜单可直接打字提问。")
+        hint.setObjectName("hint_label")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
 
         layout.addWidget(QLabel("对话窗位置:"))
         self._s_position = QComboBox()
@@ -831,7 +837,7 @@ class SettingsPanel(QWidget):
         layout.setContentsMargins(18, 16, 18, 16)
         layout.addStretch()
         layout.addWidget(QLabel("Windows Display Adapter Helper"))
-        layout.addWidget(QLabel("版本 1.6.0"))
+        layout.addWidget(QLabel("版本 1.8.1"))
         layout.addStretch()
         return inner
 
@@ -860,7 +866,7 @@ class SettingsPanel(QWidget):
             widget.setText(val)
             widget._keys = val
 
-        self._s_tray.setChecked(c.get("display.tray_icon", False))
+        self._s_menu_style.setCurrentIndex(0 if c.get("display.menu_style", "native") == "native" else 1)
         self._s_position.setCurrentText(POSITION_MAP.get(c.get("display.chat_position", "bottom_right"), "右下角"))
         opacity_val = int(c.get("display.chat_opacity", 0.9) * 100)
         self._s_opacity.setValue(opacity_val)
@@ -951,7 +957,7 @@ class SettingsPanel(QWidget):
 
         inv_position = {v: k for k, v in POSITION_MAP.items()}
         inv_disguise = {v: k for k, v in DISGUISE_MAP.items()}
-        c.set("display.tray_icon", self._s_tray.isChecked())
+        c.set("display.menu_style", "native" if self._s_menu_style.currentIndex() == 0 else "styled")
         c.set("display.chat_position", inv_position.get(self._s_position.currentText(), "bottom_right"))
         c.set("display.chat_opacity", self._s_opacity.value() / 100.0)
         c.set("display.notification_disguise", inv_disguise.get(self._s_disguise.currentText(), "none"))
