@@ -124,6 +124,7 @@ DEFAULT_CONFIG = {
     },
     "display": {
         "tray_icon": False,
+        "menu_style": "native",   # native = 原生 Windows 菜单（TrackPopupMenu）；styled = 深色样式菜单（带输入框）
         "chat_position": "bottom_right",
         "chat_opacity": 0.9,
         "chat_width": 440,

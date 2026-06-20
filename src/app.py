@@ -34,6 +34,7 @@ class VeiledApp(QObject):
 
         self._current_conv_id: str | None = None
         self._messages: list[dict] = []
+        self._last_answer: str = ""   # 供托盘菜单「上次回答」展示
 
         self._hotkey_mgr = HotkeyManager()
         self._hotkey_mgr.triggered.connect(self._on_hotkey)
@@ -62,6 +63,12 @@ class VeiledApp(QObject):
         self._tray.open_chat.connect(self._toggle_chat)
         self._tray.open_settings.connect(self._show_settings)
         self._tray.exit_app.connect(self._exit_app)
+        self._tray.ask_question.connect(self._on_menu_question)
+        self._tray.screenshot_region.connect(self._screenshot_ask)
+        self._tray.screenshot_full.connect(self._screenshot_full)
+        self._tray.clipboard_ask.connect(self._clipboard_ask)
+        self._tray.new_conversation.connect(self._new_conversation)
+        self._tray.model_changed.connect(self._on_model_changed)
 
     def start(self):
         if self._config.get("first_run", True):
@@ -82,8 +89,12 @@ class VeiledApp(QObject):
     def _start_background(self):
         self._register_hotkeys()
         self._hotkey_mgr.start()
-        if self._config.get("display.tray_icon", False):
-            self._tray.show()
+        # 托盘菜单现在是「无窗口」主交互入口，始终常驻；通知复用同一个图标。
+        self._tray.set_menu_style(self._config.get("display.menu_style", "native"))
+        self._tray.set_model_options(*self._model_options())
+        self._tray.set_last_answer(self._last_answer)
+        self._tray.show()
+        self._notification.set_tray(self._tray.tray_icon())
 
     def _register_hotkeys(self):
         hotkeys = self._config.get("hotkeys", {})
@@ -184,6 +195,19 @@ class VeiledApp(QObject):
             elif msg["role"] == "assistant":
                 self._chat_window.add_ai_message(msg["content"])
 
+    def _surface_message(self, text: str):
+        """把一条提示展示给用户：对话窗已开则进窗，否则用通知，绝不为此新开窗口。"""
+        if self._chat_window and self._chat_window.isVisible():
+            self._chat_window.add_system_message(text)
+        else:
+            self._notification.show(text)
+
+    def _capture_unsupported_msg(self) -> str:
+        return (
+            f"当前模型（{self._config.api_model}）不支持图片输入。\n"
+            f"请在托盘菜单「切换模型」选择带 👁 的视觉模型，或在设置中开启视觉识别中继。"
+        )
+
     def _boss_key(self):
         if self._chat_window:
             self._chat_window.hide()
@@ -212,12 +236,7 @@ class VeiledApp(QObject):
         if self._screenshot_overlay and self._screenshot_overlay.isVisible():
             return
         if not self._can_capture():
-            self._show_chat()
-            if self._chat_window:
-                self._chat_window.add_system_message(
-                    f"当前模型（{self._config.api_model}）不支持图片输入。\n"
-                    f"请点左上角模型名切换到带 👁 的视觉模型，或在设置中开启视觉识别中继。"
-                )
+            self._surface_message(self._capture_unsupported_msg())
             return
         self._screenshot_overlay = ScreenshotOverlay(
             self._config.get("display.screenshot_protection", True)
@@ -245,12 +264,7 @@ class VeiledApp(QObject):
         if self._env_monitor.is_silent:
             return
         if not self._can_capture():
-            self._show_chat()
-            if self._chat_window:
-                self._chat_window.add_system_message(
-                    f"当前模型（{self._config.api_model}）不支持图片输入。\n"
-                    f"请点左上角模型名切换到带 👁 的视觉模型，或在设置中开启视觉识别中继。"
-                )
+            self._surface_message(self._capture_unsupported_msg())
             return
         # 若对话窗可见，先隐藏再延迟抓屏，避免把自己截进去。
         if self._chat_window and self._chat_window.isVisible():
@@ -285,6 +299,24 @@ class VeiledApp(QObject):
             self._chat_window.add_user_message(text)
         prompt = self._config.get("prompts.chat", "")
         self._send_to_ai_stream(prompt)
+
+    def _on_menu_question(self, text: str):
+        """托盘菜单输入框提交的问题：走「无窗口」问答，答案经通知 + 菜单「上次回答」呈现。"""
+        text = (text or "").strip()
+        if not text:
+            return
+        if self._env_monitor.is_silent:
+            return
+        self._ensure_conversation()
+        if text.startswith("/"):
+            self._commands.handle(text)
+            return
+        self._messages.append({"role": "user", "content": text})
+        self._db.add_message(self._current_conv_id, "user", text)
+        if self._chat_window:
+            self._chat_window.add_user_message(text)
+        prompt = self._config.get("prompts.chat", "")
+        self._send_to_ai_stream(prompt, notify=True)
 
     def _on_command(self, text: str):
         self._commands.handle(text)
@@ -332,7 +364,9 @@ class VeiledApp(QObject):
         self._messages.append(msg)
         self._db.add_message(self._current_conv_id, "user", content, image_data)
 
-        self._ensure_chat_window().add_user_message(content, image_data)
+        # 只有对话窗已经打开时才渲染气泡；菜单/剪贴板/截图问答不创建任何窗口。
+        if self._chat_window:
+            self._chat_window.add_user_message(content, image_data)
 
         if image_data and self._vision_relay_enabled():
             # 开了中继：截图一律先经视觉模型转文字，再交主模型回答（主模型可不支持图片）
@@ -344,7 +378,8 @@ class VeiledApp(QObject):
         client = self._build_client()
         self._current_worker = client.create_worker(self._messages, system_prompt)
 
-        self._ensure_chat_window().start_ai_message()
+        if self._chat_window:
+            self._chat_window.start_ai_message()
 
         self._notify_on_finish = notify
 
@@ -361,7 +396,8 @@ class VeiledApp(QObject):
         self._current_worker = VisionPipelineWorker(
             vlm, llm, self._messages, llm_system_prompt, vlm_prompt
         )
-        self._ensure_chat_window().start_ai_message()
+        if self._chat_window:
+            self._chat_window.start_ai_message()
         self._notify_on_finish = notify
         self._current_worker.vlm_done.connect(self._on_vlm_done)
         self._current_worker.chunk_received.connect(self._on_ai_chunk)
@@ -388,6 +424,8 @@ class VeiledApp(QObject):
         self._messages.append({"role": "assistant", "content": full_text})
         if self._current_conv_id:
             self._db.add_message(self._current_conv_id, "assistant", full_text)
+        self._last_answer = full_text
+        self._tray.set_last_answer(full_text)
         if self._notify_on_finish and (not self._chat_window or not self._chat_window.isVisible()):
             self._notification.show(full_text)
 
@@ -464,6 +502,10 @@ class VeiledApp(QObject):
     def _on_model_changed(self, provider_id: str, model_id: str):
         self._config.set_active(provider_id, model_id)
         self._config.save()
+        # 不论从对话窗还是托盘菜单切换，两边都同步当前模型显示
+        self._tray.set_active(provider_id, model_id)
+        if self._chat_window:
+            self._chat_window.set_model_options(*self._model_options())
 
     def _open_providers_settings(self):
         self._show_settings()
@@ -479,10 +521,11 @@ class VeiledApp(QObject):
     def _on_settings_changed(self):
         self._notification.set_disguise(self._config.get("display.notification_disguise", "none"))
         self._env_monitor.update_process_list(self._config.get("environment.suspicious_processes", []))
-        if self._config.get("display.tray_icon", False):
-            self._tray.show()
-        else:
-            self._tray.hide()
+        # 托盘菜单常驻；设置变更后刷新菜单样式 / 模型列表并确保通知仍复用同一图标
+        self._tray.show()
+        self._tray.set_menu_style(self._config.get("display.menu_style", "native"))
+        self._tray.set_model_options(*self._model_options())
+        self._notification.set_tray(self._tray.tray_icon())
         new_theme = self._config.get("display.theme", "dark")
         from .theme import apply_theme
         apply_theme(QApplication.instance(), new_theme)
