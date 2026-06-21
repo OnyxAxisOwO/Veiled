@@ -562,6 +562,8 @@ class VeiledApp(QObject):
             self._settings_panel._apply_style()
 
         if self._chat_window:
+            # 服务商/模型增删后即时刷新模型切换芯片与菜单，无需重启
+            self._chat_window.set_model_options(*self._model_options())
             # 主题、强调色与背景图原地切换，不销毁窗口（保留滚动位置/进行中的回复）
             self._chat_window.set_accent(new_accent)
             self._chat_window.set_theme(new_theme)

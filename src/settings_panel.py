@@ -900,7 +900,7 @@ class SettingsPanel(QWidget):
         layout.setContentsMargins(18, 16, 18, 16)
         layout.addStretch()
         layout.addWidget(QLabel("Windows Display Adapter Helper"))
-        layout.addWidget(QLabel("版本 1.9.1"))
+        layout.addWidget(QLabel("版本 1.9.2"))
         layout.addStretch()
         return inner
 
