@@ -196,13 +196,19 @@ class SettingsPanel(QWidget):
         self._prov_list.currentRowChanged.connect(self._on_provider_selected)
         left.addWidget(self._prov_list, 1)
         prov_btns = QHBoxLayout()
+        prov_btns.setSpacing(4)
         add_p = QPushButton("＋ 新增")
         add_p.setObjectName("mini_btn")
         add_p.clicked.connect(self._add_provider)
+        copy_p = QPushButton("复制")
+        copy_p.setObjectName("mini_btn")
+        copy_p.setToolTip("复制当前服务商（含密钥与模型）为一个副本")
+        copy_p.clicked.connect(self._copy_provider)
         del_p = QPushButton("－ 删除")
         del_p.setObjectName("mini_btn")
         del_p.clicked.connect(self._delete_provider)
         prov_btns.addWidget(add_p)
+        prov_btns.addWidget(copy_p)
         prov_btns.addWidget(del_p)
         left.addLayout(prov_btns)
         cols.addLayout(left)
@@ -439,6 +445,22 @@ class SettingsPanel(QWidget):
         }
         self._providers.append(new)
         self._reload_provider_list(select=len(self._providers) - 1)
+
+    def _copy_provider(self):
+        """把当前选中的服务商整体复制成一个副本（新 id、名称加「副本」），
+        插入到原服务商之后并选中以便继续编辑。默认模型指针保持不变。"""
+        if not (0 <= self._cur_prov_index < len(self._providers)):
+            return
+        import copy
+        self._commit_model_form()
+        self._commit_provider_form()
+        src = self._providers[self._cur_prov_index]
+        dup = copy.deepcopy(src)
+        dup["id"] = new_provider_id()
+        dup["name"] = f"{src.get('name') or src.get('id') or '服务商'} 副本"
+        idx = self._cur_prov_index + 1
+        self._providers.insert(idx, dup)
+        self._reload_provider_list(select=idx)
 
     def _delete_provider(self):
         if not (0 <= self._cur_prov_index < len(self._providers)):
@@ -878,7 +900,7 @@ class SettingsPanel(QWidget):
         layout.setContentsMargins(18, 16, 18, 16)
         layout.addStretch()
         layout.addWidget(QLabel("Windows Display Adapter Helper"))
-        layout.addWidget(QLabel("版本 1.9.0"))
+        layout.addWidget(QLabel("版本 1.9.1"))
         layout.addStretch()
         return inner
 
