@@ -47,7 +47,6 @@ def dpapi_decrypt(data: bytes) -> bytes:
 # endpoint + key + 模型列表，用户可以创建任意多个。
 KIND_MAP = {"openai": "OpenAI 兼容", "claude": "Claude (Anthropic)"}
 POSITION_MAP = {"bottom_right": "右下角", "bottom_left": "左下角", "top_right": "右上角", "top_left": "左上角", "center": "居中"}
-DISGUISE_MAP = {"none": "无伪装", "qq": "QQ", "wechat": "微信", "edge": "浏览器 (Edge)"}
 
 DEFAULT_VISION_PROMPT = (
     "你是一个视觉识别助手。请把图片中的全部信息完整、客观地转写成文字："
@@ -131,7 +130,7 @@ DEFAULT_CONFIG = {
         "chat_height": 560,
         "screenshot_protection": True,
         "auto_start": True,
-        "notification_disguise": "none",
+        "notification_title": "",
         "screenshot_success_toast": True,
         "screenshot_success_text": "成功",
         "theme": "dark",

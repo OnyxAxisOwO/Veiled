@@ -53,7 +53,7 @@ class VeiledApp(QObject):
         self._commands.show_help.connect(self._show_help)
         self._commands.unknown_command.connect(self._unknown_command)
 
-        self._notification = NotificationManager(self._config.get("display.notification_disguise", "none"))
+        self._notification = NotificationManager(self._config.get("display.notification_title", ""))
         self._notification.notification_clicked.connect(self._toggle_chat)
 
         self._env_monitor = EnvironmentMonitor(self._config.get("environment.suspicious_processes", []))
@@ -539,7 +539,7 @@ class VeiledApp(QObject):
         # 快捷键即时生效：重新登记全部热键，无需重启
         self._hotkey_mgr.reload(self._config.get("hotkeys", {}))
 
-        self._notification.set_disguise(self._config.get("display.notification_disguise", "none"))
+        self._notification.set_title(self._config.get("display.notification_title", ""))
 
         # 环境检测按开关即时启停；关闭时清空静默/检测状态并恢复快捷键
         self._env_monitor.update_process_list(self._config.get("environment.suspicious_processes", []))

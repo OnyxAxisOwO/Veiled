@@ -9,7 +9,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QFont, QPixmap
 
 from .config import (
-    Config, KIND_MAP, POSITION_MAP, DISGUISE_MAP,
+    Config, KIND_MAP, POSITION_MAP,
     model_guess_vision, new_provider_id, DEFAULT_VISION_PROMPT,
 )
 from .widgets import HotkeyInput
@@ -742,10 +742,10 @@ class SettingsPanel(QWidget):
         row.addWidget(self._s_opacity_label)
         layout.addLayout(row)
 
-        layout.addWidget(QLabel("通知伪装:"))
-        self._s_disguise = QComboBox()
-        self._s_disguise.addItems(["无伪装", "QQ", "微信", "浏览器 (Edge)"])
-        layout.addWidget(self._s_disguise)
+        layout.addWidget(QLabel("通知标题:"))
+        self._s_notif_title = QLineEdit()
+        self._s_notif_title.setPlaceholderText("留空则不显示标题")
+        layout.addWidget(self._s_notif_title)
 
         self._s_ss_toast = QCheckBox("截图上传后弹「成功」通知")
         layout.addWidget(self._s_ss_toast)
@@ -900,7 +900,7 @@ class SettingsPanel(QWidget):
         layout.setContentsMargins(18, 16, 18, 16)
         layout.addStretch()
         layout.addWidget(QLabel("Windows Display Adapter Helper"))
-        layout.addWidget(QLabel("版本 1.9.2"))
+        layout.addWidget(QLabel("版本 1.9.3"))
         layout.addStretch()
         return inner
 
@@ -934,7 +934,7 @@ class SettingsPanel(QWidget):
         opacity_val = int(c.get("display.chat_opacity", 0.9) * 100)
         self._s_opacity.setValue(opacity_val)
         self._s_opacity_label.setText(f"{opacity_val}%")
-        self._s_disguise.setCurrentText(DISGUISE_MAP.get(c.get("display.notification_disguise", "none"), "无伪装"))
+        self._s_notif_title.setText(c.get("display.notification_title", ""))
         self._s_ss_toast.setChecked(c.get("display.screenshot_success_toast", True))
         self._s_ss_text.setText(c.get("display.screenshot_success_text", "成功"))
         self._s_theme.setCurrentText("深色" if c.get("display.theme", "dark") == "dark" else "浅色")
@@ -1028,11 +1028,10 @@ class SettingsPanel(QWidget):
                 c.set(f"hotkeys.{name}", widget.hotkey)
 
         inv_position = {v: k for k, v in POSITION_MAP.items()}
-        inv_disguise = {v: k for k, v in DISGUISE_MAP.items()}
         c.set("display.menu_style", "native" if self._s_menu_style.currentIndex() == 0 else "styled")
         c.set("display.chat_position", inv_position.get(self._s_position.currentText(), "bottom_right"))
         c.set("display.chat_opacity", self._s_opacity.value() / 100.0)
-        c.set("display.notification_disguise", inv_disguise.get(self._s_disguise.currentText(), "none"))
+        c.set("display.notification_title", self._s_notif_title.text().strip())
         c.set("display.screenshot_success_toast", self._s_ss_toast.isChecked())
         c.set("display.screenshot_success_text", self._s_ss_text.text().strip() or "成功")
         c.set("display.theme", "dark" if self._s_theme.currentText() == "深色" else "light")
@@ -1135,11 +1134,6 @@ class SettingsPanel(QWidget):
             names = "、".join(processes)
             self._s_detected_info.setText(f"🔴 当前检测到：{names}")
             self._s_detected_info.setStyleSheet("color: #e05c5c; font-weight: bold;")
-
-    def _on_disguise_changed(self, text: str):
-        visible = text == "自定义"
-        self._s_disguise_custom_label.setVisible(visible)
-        self._s_disguise_custom.setVisible(visible)
 
     def _browse_bg_image(self):
         self._set_topmost(False)

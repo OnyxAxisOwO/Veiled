@@ -1,26 +1,14 @@
-import ctypes
-import ctypes.wintypes
-import os
-import tempfile
-from pathlib import Path
-from PyQt6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
+from PyQt6.QtWidgets import QSystemTrayIcon, QApplication
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor
 from PyQt6.QtCore import pyqtSignal, QObject
-
-DISGUISE_TITLES = {
-    "qq": "QQ消息",
-    "wechat": "微信",
-    "edge": "Microsoft Edge",
-    "none": "",
-}
 
 
 class NotificationManager(QObject):
     notification_clicked = pyqtSignal()
 
-    def __init__(self, disguise: str = "none"):
+    def __init__(self, title: str = ""):
         super().__init__()
-        self._disguise = disguise
+        self._title = title
         self._tray: QSystemTrayIcon | None = None
         self._owns_tray = False
         self._pending_text = ""
@@ -35,12 +23,9 @@ class NotificationManager(QObject):
             tray.messageClicked.connect(self._on_clicked)
         except Exception:
             pass
-        tray.setIcon(self._get_icon())
 
-    def set_disguise(self, disguise: str):
-        self._disguise = disguise
-        if self._tray is not None:
-            self._tray.setIcon(self._get_icon())
+    def set_title(self, title: str):
+        self._title = title
 
     def _ensure_tray(self):
         if self._tray is None:
@@ -48,28 +33,11 @@ class NotificationManager(QObject):
             self._tray = QSystemTrayIcon(app)
             self._owns_tray = True
             self._tray.messageClicked.connect(self._on_clicked)
-            self._tray.setToolTip("Display Adapter Helper")
-            self._tray.setIcon(self._get_icon())
+            self._tray.setToolTip("AI Assistant")
+            self._tray.setIcon(self._default_icon())
             self._tray.show()
 
-    def _get_icon(self) -> QIcon:
-        icon_dir = Path(__file__).parent / "resources"
-        icon_map = {
-            "qq": "qq.ico",
-            "wechat": "wechat.ico",
-            "edge": "edge.ico",
-        }
-        icon_file = icon_map.get(self._disguise)
-        if icon_file:
-            path = icon_dir / icon_file
-            if path.exists():
-                ic = QIcon(str(path))
-                if not ic.isNull():
-                    return ic
-        # Windows 不会为「空图标」的托盘项弹气泡，所以这里必须给一个有效的回退图标。
-        return self._fallback_icon()
-
-    def _fallback_icon(self) -> QIcon:
+    def _default_icon(self) -> QIcon:
         pixmap = QPixmap(32, 32)
         pixmap.fill(QColor(0, 0, 0, 0))
         painter = QPainter(pixmap)
@@ -83,9 +51,8 @@ class NotificationManager(QObject):
     def show(self, text: str):
         self._pending_text = text
         self._ensure_tray()
-        title = DISGUISE_TITLES.get(self._disguise, "")
         display_text = text if len(text) <= 200 else text[:197] + "..."
-        self._tray.showMessage(title, display_text, QSystemTrayIcon.MessageIcon.NoIcon, 5000)
+        self._tray.showMessage(self._title, display_text, QSystemTrayIcon.MessageIcon.NoIcon, 5000)
 
     def hide(self):
         # 仅在自己创建的托盘上才销毁；共享的菜单托盘交由 TrayManager 管理，

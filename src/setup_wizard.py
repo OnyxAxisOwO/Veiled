@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont
 
-from .config import Config, POSITION_MAP, DISGUISE_MAP, new_provider_id, model_guess_vision
+from .config import Config, POSITION_MAP, new_provider_id, model_guess_vision
 from .widgets import HotkeyInput
 from .api_client import ApiClient
 
@@ -199,10 +199,10 @@ class SetupWizard(QWidget):
         self._autostart_cb.setChecked(True)
         layout.addWidget(self._autostart_cb)
 
-        layout.addWidget(QLabel("回答通知伪装来源:"))
-        self._disguise_combo = QComboBox()
-        self._disguise_combo.addItems(["无伪装", "QQ", "微信", "浏览器 (Edge)"])
-        layout.addWidget(self._disguise_combo)
+        layout.addWidget(QLabel("通知标题（留空则不显示）:"))
+        self._notif_title_input = QLineEdit()
+        self._notif_title_input.setPlaceholderText("例如：系统消息")
+        layout.addWidget(self._notif_title_input)
 
         layout.addStretch()
         return page
@@ -293,7 +293,6 @@ class SetupWizard(QWidget):
 
     def _save_and_finish(self):
         inv_position = {v: k for k, v in POSITION_MAP.items()}
-        inv_disguise = {v: k for k, v in DISGUISE_MAP.items()}
 
         kind, _m, _e = _PRESETS.get(self._provider_combo.currentText(), ("openai", "", ""))
         pid = new_provider_id()
@@ -323,7 +322,7 @@ class SetupWizard(QWidget):
         self._config.set("display.chat_opacity", self._opacity_slider.value() / 100.0)
         self._config.set("display.screenshot_protection", self._screenshot_protect_cb.isChecked())
         self._config.set("display.auto_start", self._autostart_cb.isChecked())
-        self._config.set("display.notification_disguise", inv_disguise.get(self._disguise_combo.currentText(), "none"))
+        self._config.set("display.notification_title", self._notif_title_input.text().strip())
 
         self._config.set("first_run", False)
         self._config.save()
