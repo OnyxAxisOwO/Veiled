@@ -76,6 +76,7 @@ class TrayManager(QObject):
     clipboard_ask = pyqtSignal()          # 剪贴板提问
     new_conversation = pyqtSignal()       # 新对话
     models_changed = pyqtSignal(list)     # 选中集合: [(provider_id, model_id), ...]，首项为主模型
+    toggle_windowless_mode = pyqtSignal() # 无窗口模式开关
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -90,6 +91,7 @@ class TrayManager(QObject):
         self._selected: list[tuple] = []         # 选中的 (pid, mid) 集合，首项为主模型
         self._menu_style: str = "native"        # native | styled
         self._accent_rgb: str = "59,130,246"     # 样式菜单高亮色（rgb），随主题色变化
+        self._windowless: bool = False           # 完全无窗口模式
         self._owner: QWidget | None = None       # 原生菜单的 owner 窗口（隐藏）
         self._native_model_map: dict[int, tuple] = {}
         self._native_copy_map: dict[int, str] = {}   # 原生菜单「复制某模型回答」命令 ID → 文本
@@ -127,6 +129,10 @@ class TrayManager(QObject):
         self._accent_rgb = hex_to_rgb_str(accent or "#3b82f6")
         if self._menu is not None:
             self._menu.setStyleSheet(self._styled_qss())
+
+    def set_windowless_mode(self, enabled: bool):
+        """同步无窗口模式状态，使菜单勾选态与配置保持一致。"""
+        self._windowless = enabled
 
     def set_menu_style(self, style: str):
         """切换菜单实现：native = 原生 Windows 菜单；styled = 深色样式菜单（带输入框）。"""
@@ -312,6 +318,11 @@ class TrayManager(QObject):
         m.addSeparator()
         m.addAction("💬  打开对话窗").triggered.connect(self.open_chat.emit)
         m.addAction("⚙  设置").triggered.connect(self.open_settings.emit)
+        m.addSeparator()
+        wl_act = m.addAction("🚫  无窗口模式")
+        wl_act.setCheckable(True)
+        wl_act.setChecked(self._windowless)
+        wl_act.toggled.connect(lambda _checked: self.toggle_windowless_mode.emit())
         m.addAction("⏻  退出").triggered.connect(self.exit_app.emit)
 
     def _answer_widget(self, text: str, caption: str) -> QWidget:
@@ -383,7 +394,7 @@ class TrayManager(QObject):
     _CMD = {
         "screenshot_region": 1, "screenshot_full": 2, "clipboard_ask": 3,
         "new_conversation": 4, "open_chat": 5, "open_settings": 6,
-        "exit_app": 7, "copy_answer": 8,
+        "exit_app": 7, "copy_answer": 8, "toggle_windowless": 9,
     }
 
     def _native_api(self):
@@ -467,6 +478,9 @@ class TrayManager(QObject):
 
         item(hmenu, MF_STRING, self._CMD["open_chat"], "打开对话窗")
         item(hmenu, MF_STRING, self._CMD["open_settings"], "设置")
+        item(hmenu, MF_SEPARATOR, 0, None)
+        wl_flags = MF_STRING | (MF_CHECKED if self._windowless else 0)
+        item(hmenu, wl_flags, self._CMD["toggle_windowless"], "无窗口模式")
         item(hmenu, MF_STRING, self._CMD["exit_app"], "退出")
 
         pt = ctypes.wintypes.POINT()
@@ -520,6 +534,7 @@ class TrayManager(QObject):
             self._CMD["open_settings"]: self.open_settings.emit,
             self._CMD["exit_app"]: self.exit_app.emit,
             self._CMD["copy_answer"]: self._copy_answer,
+            self._CMD["toggle_windowless"]: self.toggle_windowless_mode.emit,
         }
         if cmd in handlers:
             handlers[cmd]()

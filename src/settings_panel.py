@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QComboBox, QCheckBox, QSlider, QStackedWidget,
     QTextEdit, QFrame, QScrollArea, QListWidget, QListWidgetItem,
-    QFileDialog, QMessageBox,
+    QFileDialog, QMessageBox, QSizeGrip,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QThread
 from PyQt6.QtGui import QFont, QPixmap
@@ -42,7 +42,8 @@ class SettingsPanel(QWidget):
         super().__init__(None)
         self._config = config
         self.setWindowTitle("Display Adapter Configuration")
-        self.setFixedSize(800, 600)
+        self.resize(800, 600)
+        self.setMinimumSize(640, 480)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -149,6 +150,9 @@ class SettingsPanel(QWidget):
         save_btn.setObjectName("save_btn")
         save_btn.clicked.connect(self._save)
         fb.addWidget(save_btn)
+        grip = QSizeGrip(self)
+        grip.setFixedSize(16, 16)
+        fb.addWidget(grip)
         root.addWidget(footer)
 
         outer.addWidget(container)
@@ -855,6 +859,23 @@ class SettingsPanel(QWidget):
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(8)
 
+        self._s_windowless = QCheckBox("完全无窗口模式")
+        layout.addWidget(self._s_windowless)
+        windowless_hint = QLabel("开启后禁止创建任何窗口（对话窗、设置窗均不可打开）。\n只能通过托盘右键菜单关闭此模式。")
+        windowless_hint.setObjectName("hint_label")
+        windowless_hint.setWordWrap(True)
+        layout.addWidget(windowless_hint)
+
+        self._s_windowless_notify = QCheckBox("阻止打开窗口时发送通知提醒")
+        layout.addWidget(self._s_windowless_notify)
+
+        def _on_windowless_toggled(enabled: bool):
+            self._s_windowless_notify.setEnabled(enabled)
+
+        self._s_windowless.toggled.connect(_on_windowless_toggled)
+
+        layout.addWidget(self._hline())
+
         self._s_autostart = QCheckBox("开机自启动")
         layout.addWidget(self._s_autostart)
 
@@ -912,7 +933,7 @@ class SettingsPanel(QWidget):
         layout.setContentsMargins(18, 16, 18, 16)
         layout.addStretch()
         layout.addWidget(QLabel("Windows Display Adapter Helper"))
-        layout.addWidget(QLabel("版本 1.10.0"))
+        layout.addWidget(QLabel("版本 1.11.0"))
         layout.addStretch()
         return inner
 
@@ -962,6 +983,10 @@ class SettingsPanel(QWidget):
         self._s_save_screenshots.setChecked(c.get("privacy.save_screenshots", False))
         self._s_clear_on_exit.setChecked(c.get("privacy.clear_on_exit", False))
 
+        windowless_on = c.get("display.windowless_mode", False)
+        self._s_windowless.setChecked(windowless_on)
+        self._s_windowless_notify.setChecked(c.get("display.windowless_notify", True))
+        self._s_windowless_notify.setEnabled(windowless_on)
         self._s_autostart.setChecked(c.get("display.auto_start", True))
         self._s_close_on_focus.setChecked(c.get("display.close_on_focus_lost", False))
         monitor_on = c.get("environment.monitor_enabled", True)
@@ -1064,6 +1089,8 @@ class SettingsPanel(QWidget):
         c.set("privacy.save_screenshots", self._s_save_screenshots.isChecked())
         c.set("privacy.clear_on_exit", self._s_clear_on_exit.isChecked())
 
+        c.set("display.windowless_mode", self._s_windowless.isChecked())
+        c.set("display.windowless_notify", self._s_windowless_notify.isChecked())
         c.set("display.auto_start", self._s_autostart.isChecked())
         c.set("display.close_on_focus_lost", self._s_close_on_focus.isChecked())
         c.set("environment.monitor_enabled", self._s_monitor_enabled.isChecked())

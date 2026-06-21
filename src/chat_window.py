@@ -795,7 +795,7 @@ class ChatWindow(QWidget):
                 #user_bubble #stats_label { color: rgba(255,255,255,120); font-size: 10px; font-family: 'Consolas'; }
                 #bubble_image { border-radius: 8px; }
                 #ai_bubble {
-                    background-color: rgba(58, 58, 62, 210);
+                    background-color: rgba(59,130,246, 55);
                     border-radius: 12px; margin-right: 56px;
                 }
                 #ai_bubble QLabel { color: #ececec; }
@@ -890,7 +890,7 @@ class ChatWindow(QWidget):
                 #user_bubble #stats_label { color: rgba(255,255,255,150); font-size: 10px; font-family: 'Consolas'; }
                 #bubble_image { border-radius: 8px; }
                 #ai_bubble {
-                    background-color: rgba(238, 238, 240, 235);
+                    background-color: rgba(59,130,246, 38);
                     border-radius: 12px; margin-right: 56px;
                 }
                 #ai_bubble QLabel { color: #2b2b2b; }

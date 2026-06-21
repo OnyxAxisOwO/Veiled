@@ -83,6 +83,7 @@ class VeiledApp(QObject):
         self._tray.clipboard_ask.connect(self._clipboard_ask)
         self._tray.new_conversation.connect(self._new_conversation)
         self._tray.models_changed.connect(self._on_models_changed)
+        self._tray.toggle_windowless_mode.connect(self._on_tray_toggle_windowless)
 
     def start(self):
         if self._config.get("first_run", True):
@@ -108,6 +109,7 @@ class VeiledApp(QObject):
         self._tray.set_accent(self._config.get("display.accent_color", "#3b82f6"))
         self._tray.set_model_options(*self._model_options())
         self._tray.set_last_answers(self._last_answers)
+        self._tray.set_windowless_mode(self._config.get("display.windowless_mode", False))
         self._tray.show()
         self._notification.set_tray(self._tray.tray_icon())
 
@@ -144,11 +146,20 @@ class VeiledApp(QObject):
         if action:
             action()
 
+    def _notify_windowless_blocked(self):
+        """无窗口模式拦截了打开窗口的操作时，按用户设置决定是否发通知。"""
+        if self._config.get("display.windowless_notify", True):
+            self._notification.show("无窗口模式已开启，窗口不可用。\n可通过托盘右键菜单关闭此模式。")
+
     def _toggle_chat(self):
+        # 隐藏操作在无窗口模式下仍然允许（不拦截 hide）
         if self._chat_window and self._chat_window.isVisible():
             self._hide_chat()
-        else:
-            self._show_chat()
+            return
+        if self._config.get("display.windowless_mode", False):
+            self._notify_windowless_blocked()
+            return
+        self._show_chat()
 
     def _ensure_chat_window(self) -> ChatWindow:
         self._ensure_conversation()
@@ -157,6 +168,9 @@ class VeiledApp(QObject):
         return self._chat_window
 
     def _show_chat(self):
+        if self._config.get("display.windowless_mode", False):
+            self._notify_windowless_blocked()
+            return
         self._ensure_chat_window()
         if not self._chat_window.isVisible():
             self._chat_window.show()
@@ -778,11 +792,27 @@ class VeiledApp(QObject):
             self._settings_panel.open_providers_page()
 
     def _show_settings(self):
+        if self._config.get("display.windowless_mode", False):
+            self._notify_windowless_blocked()
+            return
         if not self._settings_panel:
             self._settings_panel = SettingsPanel(self._config)
             self._settings_panel.settings_changed.connect(self._on_settings_changed)
         self._settings_panel.show()
         self._settings_panel.update_detected_processes(self._env_monitor.detected_processes)
+
+    def _on_tray_toggle_windowless(self):
+        """托盘菜单切换无窗口模式：不打开任何窗口，即时生效并保存。"""
+        current = self._config.get("display.windowless_mode", False)
+        new_val = not current
+        self._config.set("display.windowless_mode", new_val)
+        self._config.save()
+        self._tray.set_windowless_mode(new_val)
+        if new_val:
+            if self._chat_window and self._chat_window.isVisible():
+                self._chat_window.hide()
+            if self._settings_panel and self._settings_panel.isVisible():
+                self._settings_panel.hide()
 
     def _on_settings_changed(self):
         # 快捷键即时生效：重新登记全部热键，无需重启
@@ -804,6 +834,13 @@ class VeiledApp(QObject):
         self._tray.set_accent(new_accent)
         self._tray.set_model_options(*self._model_options())
         self._notification.set_tray(self._tray.tray_icon())
+        # 无窗口模式变更：同步状态到托盘，若刚开启则关闭所有窗口
+        new_windowless = self._config.get("display.windowless_mode", False)
+        self._tray.set_windowless_mode(new_windowless)
+        if new_windowless:
+            if self._chat_window and self._chat_window.isVisible():
+                self._chat_window.hide()
+            # 设置面板在 _save() → _on_close() 里已自行 hide，此处无需重复
         new_theme = self._config.get("display.theme", "dark")
         from .theme import apply_theme
         apply_theme(QApplication.instance(), new_theme, new_accent)
