@@ -135,6 +135,7 @@ DEFAULT_CONFIG = {
         "screenshot_success_toast": True,
         "screenshot_success_text": "成功",
         "theme": "dark",
+        "accent_color": "#3b82f6",
         "close_on_focus_lost": False,
     },
     "privacy": {

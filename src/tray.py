@@ -7,6 +7,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QIcon, QActionGroup, QPixmap, QPainter, QColor
 from PyQt6.QtCore import pyqtSignal, QObject, Qt, QTimer
 
+from .theme import hex_to_rgb_str
+
 
 MENU_QSS = """
     QMenu {
@@ -84,6 +86,7 @@ class TrayManager(QObject):
         self._active_pid: str = ""
         self._active_mid: str = ""
         self._menu_style: str = "native"        # native | styled
+        self._accent_rgb: str = "59,130,246"     # 样式菜单高亮色（rgb），随主题色变化
         self._owner: QWidget | None = None       # 原生菜单的 owner 窗口（隐藏）
         self._native_model_map: dict[int, tuple] = {}
         self._native_api_ready = False
@@ -98,7 +101,7 @@ class TrayManager(QObject):
         self._tray.setToolTip("Display Adapter Helper")
 
         self._menu = QMenu()
-        self._menu.setStyleSheet(MENU_QSS)
+        self._menu.setStyleSheet(self._styled_qss())
         # 每次弹出前重建（模型列表 / 上次回答可能已变），并尝试把键盘焦点抢给输入框
         self._menu.aboutToShow.connect(self._on_about_to_show)
         self._tray.activated.connect(self._on_activated)
@@ -111,6 +114,15 @@ class TrayManager(QObject):
             self._tray = None
             self._menu = None
             self._input = None
+
+    def _styled_qss(self) -> str:
+        return MENU_QSS.replace("59,130,246", self._accent_rgb)
+
+    def set_accent(self, accent: str):
+        """设置样式菜单的高亮主题色（rgb 注入 MENU_QSS）。"""
+        self._accent_rgb = hex_to_rgb_str(accent or "#3b82f6")
+        if self._menu is not None:
+            self._menu.setStyleSheet(self._styled_qss())
 
     def set_menu_style(self, style: str):
         """切换菜单实现：native = 原生 Windows 菜单；styled = 深色样式菜单（带输入框）。"""
@@ -265,7 +277,7 @@ class TrayManager(QObject):
         # 模型 / 对话
         m.addSeparator()
         model_menu = m.addMenu("🧠  切换模型")
-        model_menu.setStyleSheet(MENU_QSS)
+        model_menu.setStyleSheet(self._styled_qss())
         self._build_model_submenu(model_menu)
         m.addAction("➕  新对话").triggered.connect(self.new_conversation.emit)
 

@@ -14,6 +14,7 @@ from .config import (
 )
 from .widgets import HotkeyInput
 from .api_client import ApiClient
+from .theme import hex_to_rgb_str, darken
 
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
@@ -738,6 +739,26 @@ class SettingsPanel(QWidget):
         self._s_theme.addItems(["深色", "浅色"])
         layout.addWidget(self._s_theme)
 
+        layout.addWidget(QLabel("按钮主题色:"))
+        accent_row = QHBoxLayout()
+        accent_row.setSpacing(8)
+        self._accent_swatches: list[tuple[str, QPushButton]] = []
+        for hexc in ("#3b82f6", "#22c55e", "#8b5cf6", "#ef4444",
+                     "#f59e0b", "#14b8a6", "#ec4899", "#64748b"):
+            sw = QPushButton()
+            sw.setObjectName("accent_swatch")
+            sw.setFixedSize(26, 26)
+            sw.setCursor(Qt.CursorShape.PointingHandCursor)
+            sw.clicked.connect(lambda _checked=False, c=hexc: self._set_accent(c))
+            accent_row.addWidget(sw)
+            self._accent_swatches.append((hexc, sw))
+        custom_accent = QPushButton("自定义…")
+        custom_accent.setObjectName("mini_btn")
+        custom_accent.clicked.connect(self._pick_custom_accent)
+        accent_row.addWidget(custom_accent)
+        accent_row.addStretch()
+        layout.addLayout(accent_row)
+
         layout.addWidget(self._hline())
 
         layout.addWidget(QLabel("自定义背景图片:"))
@@ -822,6 +843,9 @@ class SettingsPanel(QWidget):
         layout.addWidget(self._s_detected_info)
 
         def _on_monitor_toggled(enabled: bool):
+            # 关闭环境检测时，「检测到监控软件时发送通知」一并强制关闭并禁用
+            if not enabled:
+                self._s_notify_on_silent.setChecked(False)
             self._s_notify_on_silent.setEnabled(enabled)
             self._s_processes.setEnabled(enabled)
             self._s_detected_info.setVisible(enabled)
@@ -854,7 +878,7 @@ class SettingsPanel(QWidget):
         layout.setContentsMargins(18, 16, 18, 16)
         layout.addStretch()
         layout.addWidget(QLabel("Windows Display Adapter Helper"))
-        layout.addWidget(QLabel("版本 1.8.4"))
+        layout.addWidget(QLabel("版本 1.9.0"))
         layout.addStretch()
         return inner
 
@@ -892,6 +916,8 @@ class SettingsPanel(QWidget):
         self._s_ss_toast.setChecked(c.get("display.screenshot_success_toast", True))
         self._s_ss_text.setText(c.get("display.screenshot_success_text", "成功"))
         self._s_theme.setCurrentText("深色" if c.get("display.theme", "dark") == "dark" else "浅色")
+        self._accent = c.get("display.accent_color", "#3b82f6") or "#3b82f6"
+        self._refresh_accent_swatches()
         self._s_bg_path.setText(c.get("display.bg_image_path", ""))
         _bg_mode_map = {"fill": "填充", "fit": "适应", "stretch": "拉伸", "tile": "平铺", "center": "居中"}
         self._s_bg_mode.setCurrentText(_bg_mode_map.get(c.get("display.bg_fill_mode", "fill"), "填充"))
@@ -905,7 +931,8 @@ class SettingsPanel(QWidget):
         self._s_close_on_focus.setChecked(c.get("display.close_on_focus_lost", False))
         monitor_on = c.get("environment.monitor_enabled", True)
         self._s_monitor_enabled.setChecked(monitor_on)
-        self._s_notify_on_silent.setChecked(c.get("environment.notify_on_silent", True))
+        # 环境检测关闭时，通知开关一并视为关闭（与运行时门控一致）
+        self._s_notify_on_silent.setChecked(monitor_on and c.get("environment.notify_on_silent", True))
         self._s_notify_on_silent.setEnabled(monitor_on)
         self._s_processes.setEnabled(monitor_on)
         self._s_processes.setText("\n".join(c.get("environment.suspicious_processes", [])))
@@ -987,6 +1014,7 @@ class SettingsPanel(QWidget):
         c.set("display.screenshot_success_toast", self._s_ss_toast.isChecked())
         c.set("display.screenshot_success_text", self._s_ss_text.text().strip() or "成功")
         c.set("display.theme", "dark" if self._s_theme.currentText() == "深色" else "light")
+        c.set("display.accent_color", self._accent_hex())
         c.set("display.bg_image_path", self._s_bg_path.text().strip())
         _bg_mode_inv = {"填充": "fill", "适应": "fit", "拉伸": "stretch", "平铺": "tile", "居中": "center"}
         c.set("display.bg_fill_mode", _bg_mode_inv.get(self._s_bg_mode.currentText(), "fill"))
@@ -1060,7 +1088,7 @@ class SettingsPanel(QWidget):
         self.settings_changed.emit()
         QMessageBox.information(
             self, "导入成功",
-            "配置已导入并保存。\n热键等部分设置可能需要重启应用后生效。"
+            "配置已导入并保存，热键 / 主题色等设置已即时生效。"
         )
 
     def _set_topmost(self, on: bool):
@@ -1107,6 +1135,35 @@ class SettingsPanel(QWidget):
             return
         self._s_bg_path.setText(path)
 
+    # ── 按钮主题色 ────────────────────────────────────────────────────────────
+
+    def _accent_hex(self) -> str:
+        return getattr(self, "_accent", None) or self._config.get("display.accent_color", "#3b82f6") or "#3b82f6"
+
+    def _set_accent(self, hexc: str):
+        self._accent = hexc or "#3b82f6"
+        self._refresh_accent_swatches()
+        self._apply_style()   # 即时预览
+
+    def _refresh_accent_swatches(self):
+        cur = (self._accent_hex() or "").lower()
+        ring = "#ffffff" if self._s_theme.currentText() == "深色" else "#222222"
+        for hexc, btn in getattr(self, "_accent_swatches", []):
+            selected = (hexc.lower() == cur)
+            border = f"2px solid {ring}" if selected else "2px solid transparent"
+            btn.setStyleSheet(f"background:{hexc}; border-radius:13px; border:{border};")
+
+    def _pick_custom_accent(self):
+        from PyQt6.QtWidgets import QColorDialog
+        from PyQt6.QtGui import QColor
+        self._set_topmost(False)
+        try:
+            col = QColorDialog.getColor(QColor(self._accent_hex()), self, "选择按钮主题色")
+        finally:
+            self._set_topmost(True)
+        if col.isValid():
+            self._set_accent(col.name())
+
     def _on_close(self):
         self.hide()
         self.closed.emit()
@@ -1130,8 +1187,11 @@ class SettingsPanel(QWidget):
     # ── 样式 ──────────────────────────────────────────────────────────────────
 
     def _apply_style(self):
+        accent = self._accent_hex()
+        accent_rgb = hex_to_rgb_str(accent)
+        accent_dark = darken(accent)
         if self._config.get("display.theme", "dark") == "light":
-            self.setStyleSheet("""
+            qss = """
                 #settings_container {
                     background-color: rgba(252, 252, 253, 248);
                     border-radius: 12px;
@@ -1234,9 +1294,22 @@ class SettingsPanel(QWidget):
                 QScrollBar:vertical { width: 7px; background: transparent; }
                 QScrollBar::handle:vertical { background: rgba(0,0,0,25); border-radius: 3px; min-height: 22px; }
                 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
-            """)
+                QComboBox::drop-down {
+                    subcontrol-origin: padding; subcontrol-position: center right;
+                    width: 24px; border: none; background: transparent;
+                }
+                QComboBox::down-arrow {
+                    width: 0; height: 0; margin-right: 9px;
+                    border-left: 4px solid transparent; border-right: 4px solid transparent;
+                    border-top: 5px solid rgba(0,0,0,115);
+                }
+                QComboBox::down-arrow:on {
+                    border-top: none; border-bottom: 5px solid rgba(0,0,0,150);
+                }
+                QComboBox::down-arrow:disabled { border-top-color: rgba(0,0,0,45); }
+            """
         else:
-            self.setStyleSheet("""
+            qss = """
                 #settings_container {
                     background-color: rgba(32, 32, 34, 248);
                     border-radius: 12px;
@@ -1339,4 +1412,22 @@ class SettingsPanel(QWidget):
                 QScrollBar:vertical { width: 7px; background: transparent; }
                 QScrollBar::handle:vertical { background: rgba(255,255,255,40); border-radius: 3px; min-height: 22px; }
                 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }
-            """)
+                QComboBox::drop-down {
+                    subcontrol-origin: padding; subcontrol-position: center right;
+                    width: 24px; border: none; background: transparent;
+                }
+                QComboBox::down-arrow {
+                    width: 0; height: 0; margin-right: 9px;
+                    border-left: 4px solid transparent; border-right: 4px solid transparent;
+                    border-top: 5px solid rgba(255,255,255,150);
+                }
+                QComboBox::down-arrow:on {
+                    border-top: none; border-bottom: 5px solid rgba(255,255,255,185);
+                }
+                QComboBox::down-arrow:disabled { border-top-color: rgba(255,255,255,60); }
+            """
+        self.setStyleSheet(
+            qss.replace("#2f6fe0", accent_dark)
+               .replace("#3b82f6", accent)
+               .replace("59,130,246", accent_rgb)
+        )

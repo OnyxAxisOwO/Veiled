@@ -24,7 +24,8 @@ class VeiledApp(QObject):
         self._db = Database(self._config.db_path)
 
         from .theme import apply_theme
-        apply_theme(QApplication.instance(), self._config.get("display.theme", "dark"))
+        apply_theme(QApplication.instance(), self._config.get("display.theme", "dark"),
+                    self._config.get("display.accent_color", "#3b82f6"))
 
         self._chat_window: ChatWindow | None = None
         self._chat_struct: tuple | None = None   # 窗口结构性参数签名，变化时才重建窗口
@@ -56,6 +57,7 @@ class VeiledApp(QObject):
         self._notification.notification_clicked.connect(self._toggle_chat)
 
         self._env_monitor = EnvironmentMonitor(self._config.get("environment.suspicious_processes", []))
+        self._env_monitor.silent_mode_changed.connect(self._on_silent_changed)
         if self._config.get("environment.monitor_enabled", True):
             self._env_monitor.start()
 
@@ -91,6 +93,7 @@ class VeiledApp(QObject):
         self._hotkey_mgr.start()
         # 托盘菜单现在是「无窗口」主交互入口，始终常驻；通知复用同一个图标。
         self._tray.set_menu_style(self._config.get("display.menu_style", "native"))
+        self._tray.set_accent(self._config.get("display.accent_color", "#3b82f6"))
         self._tray.set_model_options(*self._model_options())
         self._tray.set_last_answer(self._last_answer)
         self._tray.show()
@@ -171,6 +174,7 @@ class VeiledApp(QObject):
             position=c.get("display.chat_position", "bottom_right"),
             screenshot_protection=c.get("display.screenshot_protection", True),
             theme=c.get("display.theme", "dark"),
+            accent=c.get("display.accent_color", "#3b82f6"),
         )
         self._chat_window.message_sent.connect(self._on_user_message)
         self._chat_window.command_entered.connect(self._on_command)
@@ -218,7 +222,9 @@ class VeiledApp(QObject):
         self._notification.hide()
 
     def _on_silent_changed(self, is_silent: bool):
-        if self._config.get("environment.notify_on_silent", True):
+        # 环境检测关闭时绝不弹通知（即便配置里残留 notify_on_silent=True）
+        if (self._config.get("environment.monitor_enabled", True)
+                and self._config.get("environment.notify_on_silent", True)):
             if is_silent:
                 names = "、".join(self._env_monitor.detected_processes)
                 self._notification.show(f"⚠ 检测到监控软件（{names}），快捷键已屏蔽")
@@ -530,21 +536,34 @@ class VeiledApp(QObject):
         self._settings_panel.update_detected_processes(self._env_monitor.detected_processes)
 
     def _on_settings_changed(self):
+        # 快捷键即时生效：重新登记全部热键，无需重启
+        self._hotkey_mgr.reload(self._config.get("hotkeys", {}))
+
         self._notification.set_disguise(self._config.get("display.notification_disguise", "none"))
+
+        # 环境检测按开关即时启停；关闭时清空静默/检测状态并恢复快捷键
         self._env_monitor.update_process_list(self._config.get("environment.suspicious_processes", []))
-        # 托盘菜单常驻；设置变更后刷新菜单样式 / 模型列表并确保通知仍复用同一图标
+        if self._config.get("environment.monitor_enabled", True):
+            self._env_monitor.start()
+        else:
+            self._env_monitor.disable()
+
+        new_accent = self._config.get("display.accent_color", "#3b82f6")
+        # 托盘菜单常驻；设置变更后刷新菜单样式 / 强调色 / 模型列表并确保通知仍复用同一图标
         self._tray.show()
         self._tray.set_menu_style(self._config.get("display.menu_style", "native"))
+        self._tray.set_accent(new_accent)
         self._tray.set_model_options(*self._model_options())
         self._notification.set_tray(self._tray.tray_icon())
         new_theme = self._config.get("display.theme", "dark")
         from .theme import apply_theme
-        apply_theme(QApplication.instance(), new_theme)
+        apply_theme(QApplication.instance(), new_theme, new_accent)
         if self._settings_panel:
             self._settings_panel._apply_style()
 
         if self._chat_window:
-            # 主题与背景图原地切换，不销毁窗口（保留滚动位置/进行中的回复）
+            # 主题、强调色与背景图原地切换，不销毁窗口（保留滚动位置/进行中的回复）
+            self._chat_window.set_accent(new_accent)
             self._chat_window.set_theme(new_theme)
             self._chat_window.set_background(
                 self._config.get("display.bg_image_path", ""),

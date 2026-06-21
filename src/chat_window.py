@@ -8,6 +8,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, QPoint, QTimer, QSize
 from PyQt6.QtGui import QFont, QKeyEvent, QPixmap, QActionGroup, QPainter
 
+from .theme import hex_to_rgb_str
+
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
 
@@ -206,7 +208,7 @@ class ChatWindow(QWidget):
     manage_providers_requested = pyqtSignal()
 
     def __init__(self, width=440, height=560, opacity=0.9, position="bottom_right",
-                 screenshot_protection=True, theme="dark"):
+                 screenshot_protection=True, theme="dark", accent="#3b82f6"):
         super().__init__(None)
         self._width = width
         self._height = height
@@ -214,6 +216,7 @@ class ChatWindow(QWidget):
         self._position = position
         self._screenshot_protection = screenshot_protection
         self._theme = theme
+        self._accent = accent or "#3b82f6"
         self._drag_pos = None
         self._bubbles: list[MessageBubble] = []
         self._current_ai_bubble: MessageBubble | None = None
@@ -553,8 +556,9 @@ class ChatWindow(QWidget):
 
     def _styled_menu(self) -> QMenu:
         menu = QMenu(self)
+        argb = hex_to_rgb_str(self._accent)
         if self._theme == "dark":
-            menu.setStyleSheet("""
+            css = """
                 QMenu {
                     background-color: #2b2b2b; color: #e0e0e0;
                     border: 1px solid rgba(255,255,255,25);
@@ -565,9 +569,9 @@ class ChatWindow(QWidget):
                 QMenu::item:selected { background-color: rgba(59,130,246,160); color: white; }
                 QMenu::item:disabled { color: #777; }
                 QMenu::separator { height: 1px; background: rgba(255,255,255,20); margin: 5px 8px; }
-            """)
+            """
         else:
-            menu.setStyleSheet("""
+            css = """
                 QMenu {
                     background-color: #ffffff; color: #333;
                     border: 1px solid rgba(0,0,0,25);
@@ -578,7 +582,8 @@ class ChatWindow(QWidget):
                 QMenu::item:selected { background-color: rgba(59,130,246,180); color: white; }
                 QMenu::item:disabled { color: #aaa; }
                 QMenu::separator { height: 1px; background: rgba(0,0,0,15); margin: 5px 8px; }
-            """)
+            """
+        menu.setStyleSheet(css.replace("59,130,246", argb))
         return menu
 
     # ── Message operations ────────────────────────────────────────────────────
@@ -690,8 +695,10 @@ class ChatWindow(QWidget):
     # ── Stylesheet ─────────────────────────────────────────────────────────────
 
     def _apply_style(self):
+        accent = self._accent or "#3b82f6"
+        accent_rgb = hex_to_rgb_str(accent)
         if self._theme == "dark":
-            self.setStyleSheet("""
+            qss = """
                 #chat_container {
                     background-color: rgba(28, 28, 30, 242);
                     border-radius: 14px;
@@ -785,9 +792,9 @@ class ChatWindow(QWidget):
                     font-size: 12px; font-family: 'Microsoft YaHei';
                 }
                 #send_btn:hover { background-color: rgba(59, 130, 246, 240); }
-            """)
+            """
         else:
-            self.setStyleSheet("""
+            qss = """
                 #chat_container {
                     background-color: rgba(252, 252, 253, 245);
                     border-radius: 14px; border: 1px solid rgba(0,0,0,28);
@@ -878,7 +885,12 @@ class ChatWindow(QWidget):
                     font-size: 12px; font-family: 'Microsoft YaHei';
                 }
                 #send_btn:hover { background-color: rgba(59,130,246,255); }
-            """)
+            """
+        self.setStyleSheet(
+            qss.replace("59, 130, 246", accent_rgb)
+               .replace("59,130,246", accent_rgb)
+               .replace("#3b82f6", accent)
+        )
 
     def set_background(self, path: str, fill_mode: str = "fill"):
         if path:
@@ -890,4 +902,8 @@ class ChatWindow(QWidget):
     def set_theme(self, theme: str):
         self._theme = theme
         self._container.set_theme(theme)
+        self._apply_style()
+
+    def set_accent(self, accent: str):
+        self._accent = accent or "#3b82f6"
         self._apply_style()

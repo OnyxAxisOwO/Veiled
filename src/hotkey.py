@@ -71,6 +71,33 @@ class HotkeyManager(QObject):
             self._pending_registrations = getattr(self, "_pending_registrations", [])
             self._pending_registrations.append((hk_id, modifiers, vk))
 
+    def reload(self, hotkeys: dict):
+        """运行时重新登记全部热键：在调用线程解析组合键，再交由工作线程注销现有
+        全部热键并安装新集合，从而让改动的快捷键无需重启即时生效。"""
+        specs = []
+        for name, combo in hotkeys.items():
+            if not combo:
+                continue
+            try:
+                mods, vk = parse_hotkey(combo)
+            except ValueError:
+                continue
+            specs.append((name, mods, vk))
+        self._pending_reload = specs
+        if self._thread_id:
+            ctypes.windll.user32.PostThreadMessageW(self._thread_id, 0x0401, 0, 0)  # WM_USER+1 重载
+        else:
+            # 线程尚未启动：折叠进 pending 注册，让 start() 直接安装这批热键
+            self._hotkeys = {}
+            self._next_id = 1
+            self._pending_registrations = []
+            for name, mods, vk in specs:
+                hk_id = self._next_id
+                self._next_id += 1
+                self._hotkeys[hk_id] = name
+                self._pending_registrations.append((hk_id, mods, vk))
+            self._pending_reload = []
+
     def start(self):
         if self._running:
             return
@@ -108,6 +135,16 @@ class HotkeyManager(QObject):
                 mods = (packed >> 16) & 0xFFFF
                 vk = packed & 0xFFFF
                 user32.RegisterHotKey(None, hk_id, mods | 0x4000, vk)
+            elif msg.message == 0x0401:  # WM_USER+1 - 注销全部并按 _pending_reload 重新登记
+                for hk_id in list(self._hotkeys):
+                    user32.UnregisterHotKey(None, hk_id)
+                self._hotkeys = {}
+                for name, mods, vk in getattr(self, "_pending_reload", []):
+                    hk_id = self._next_id
+                    self._next_id += 1
+                    self._hotkeys[hk_id] = name
+                    user32.RegisterHotKey(None, hk_id, mods | 0x4000, vk)
+                self._pending_reload = []
 
         for hk_id in self._hotkeys:
             user32.UnregisterHotKey(None, hk_id)

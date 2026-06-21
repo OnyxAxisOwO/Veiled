@@ -349,8 +349,16 @@ class SetupWizard(QWidget):
                 font-size: 12px;
             }
             QComboBox::drop-down {
-                border: none;
-                width: 24px;
+                subcontrol-origin: padding; subcontrol-position: center right;
+                border: none; width: 24px; background: transparent;
+            }
+            QComboBox::down-arrow {
+                width: 0; height: 0; margin-right: 9px;
+                border-left: 4px solid transparent; border-right: 4px solid transparent;
+                border-top: 5px solid rgba(0,0,0,120);
+            }
+            QComboBox::down-arrow:on {
+                border-top: none; border-bottom: 5px solid rgba(0,0,0,150);
             }
             QComboBox QAbstractItemView {
                 background: white;
