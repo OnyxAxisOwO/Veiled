@@ -4,10 +4,11 @@ from PyQt6.QtWidgets import (
     QSystemTrayIcon, QMenu, QWidgetAction, QLineEdit, QLabel,
     QWidget, QVBoxLayout, QScrollArea, QApplication,
 )
-from PyQt6.QtGui import QIcon, QActionGroup, QPixmap, QPainter, QColor
+from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor
 from PyQt6.QtCore import pyqtSignal, QObject, Qt, QTimer
 
 from .theme import hex_to_rgb_str
+from .chat_window import MultiSelectMenu
 
 
 MENU_QSS = """
@@ -74,7 +75,7 @@ class TrayManager(QObject):
     screenshot_full = pyqtSignal()        # 全屏截图提问
     clipboard_ask = pyqtSignal()          # 剪贴板提问
     new_conversation = pyqtSignal()       # 新对话
-    model_changed = pyqtSignal(str, str)  # provider_id, model_id
+    models_changed = pyqtSignal(list)     # 选中集合: [(provider_id, model_id), ...]，首项为主模型
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -82,13 +83,16 @@ class TrayManager(QObject):
         self._menu: QMenu | None = None
         self._input: _MenuLineEdit | None = None
         self._last_answer: str = ""
+        self._answers: list[tuple] = []          # [(模型名, 回答), ...]；多模型时每个一项
         self._providers: list[dict] = []
         self._active_pid: str = ""
         self._active_mid: str = ""
+        self._selected: list[tuple] = []         # 选中的 (pid, mid) 集合，首项为主模型
         self._menu_style: str = "native"        # native | styled
         self._accent_rgb: str = "59,130,246"     # 样式菜单高亮色（rgb），随主题色变化
         self._owner: QWidget | None = None       # 原生菜单的 owner 窗口（隐藏）
         self._native_model_map: dict[int, tuple] = {}
+        self._native_copy_map: dict[int, str] = {}   # 原生菜单「复制某模型回答」命令 ID → 文本
         self._native_api_ready = False
 
     # ── 生命周期 ──────────────────────────────────────────────────────────────
@@ -158,17 +162,22 @@ class TrayManager(QObject):
 
     # ── 数据注入 ──────────────────────────────────────────────────────────────
 
-    def set_model_options(self, providers: list[dict], active_pid: str, active_mid: str):
+    def set_model_options(self, providers: list[dict], active_pid: str, active_mid: str,
+                          selected: list = None):
         self._providers = providers or []
         self._active_pid = active_pid or ""
         self._active_mid = active_mid or ""
+        if selected:
+            self._selected = [tuple(s) for s in selected]
+        elif self._active_mid:
+            self._selected = [(self._active_pid, self._active_mid)]
+        else:
+            self._selected = []
 
-    def set_active(self, pid: str, mid: str):
-        self._active_pid = pid or ""
-        self._active_mid = mid or ""
-
-    def set_last_answer(self, text: str):
-        self._last_answer = text or ""
+    def set_last_answers(self, answers: list):
+        """多模型回答：answers = [(模型名, 回答), ...]。供菜单「上次回答」分模型展示。"""
+        self._answers = [(lbl or "", txt or "") for lbl, txt in (answers or []) if (txt or "").strip()]
+        self._last_answer = self._answers[0][1] if self._answers else ""
 
     # ── 交互 ──────────────────────────────────────────────────────────────────
 
@@ -207,15 +216,44 @@ class TrayManager(QObject):
         self.ask_question.emit(text)
 
     def _copy_answer(self):
-        app = QApplication.instance()
-        if app and self._last_answer:
-            app.clipboard().setText(self._last_answer)
+        self._copy_text(self._last_answer)
 
-    def _pick_model(self, pid: str, mid: str):
-        if pid == self._active_pid and mid == self._active_mid:
-            return
-        self._active_pid, self._active_mid = pid, mid
-        self.model_changed.emit(pid, mid)
+    def _copy_text(self, text: str):
+        app = QApplication.instance()
+        if app and text:
+            app.clipboard().setText(text)
+
+    def _toggle_model(self, pid: str, mid: str):
+        """原生菜单：点击模型即「勾选/取消」其参与并行（菜单已关闭，重开看勾选态）。"""
+        key = (pid, mid)
+        sel = list(self._selected)
+        if key in sel:
+            if len(sel) == 1:
+                return   # 至少保留一个模型
+            sel.remove(key)
+        else:
+            sel.append(key)
+        self._selected = sel
+        self.models_changed.emit([list(k) for k in sel])
+
+    def _on_model_toggled(self, pid: str, mid: str, checked: bool, action):
+        """样式菜单：可勾选项的 toggled 处理（菜单保持打开，可连续多选）。"""
+        key = (pid, mid)
+        sel = list(self._selected)
+        if checked:
+            if key not in sel:
+                sel.append(key)
+        else:
+            if key in sel:
+                if len(sel) == 1:
+                    # 至少保留一个模型：撤销本次取消，屏蔽信号避免 setChecked 再触发 toggled
+                    action.blockSignals(True)
+                    action.setChecked(True)
+                    action.blockSignals(False)
+                    return
+                sel.remove(key)
+        self._selected = sel
+        self.models_changed.emit([list(k) for k in sel])
 
     # ── 菜单构建 ──────────────────────────────────────────────────────────────
 
@@ -234,39 +272,26 @@ class TrayManager(QObject):
         self._input.submit.connect(self._submit_input)
         m.addAction(self._wrap_widget(m, self._input))
 
-        # 上次回答
-        if self._last_answer.strip():
+        # 上次回答：单模型内嵌展示；多模型则每个模型一个子菜单
+        if len(self._answers) == 1 and not self._answers[0][0]:
             m.addSeparator()
-            ans = self._last_answer.strip()
-            disp = ans if len(ans) <= 4000 else ans[:4000] + "…"
-            box = QWidget()
-            box.setObjectName("menu_row")
-            box_l = QVBoxLayout(box)
-            box_l.setContentsMargins(10, 4, 10, 4)
-            box_l.setSpacing(4)
-            cap = QLabel("上次回答")
-            cap.setObjectName("menu_caption")
-            ans_lbl = QLabel(disp)
-            ans_lbl.setObjectName("menu_answer")
-            ans_lbl.setWordWrap(True)          # 自动换行
-            ans_lbl.setMaximumWidth(340)
-            ans_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            box_l.addWidget(cap)
-            # 长答案放进限高滚动区：既完整换行展示，又不让菜单无限拉高
-            scroll = QScrollArea()
-            scroll.setObjectName("menu_answer_scroll")
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-            scroll.setMinimumWidth(320)
-            scroll.setMaximumHeight(240)
-            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            scroll.setWidget(ans_lbl)
-            box_l.addWidget(scroll)
             wa = QWidgetAction(m)
-            wa.setDefaultWidget(box)
+            wa.setDefaultWidget(self._answer_widget(self._answers[0][1], "上次回答"))
             m.addAction(wa)
             copy_act = m.addAction("📋  复制上次回答")
             copy_act.triggered.connect(self._copy_answer)
+        elif self._answers:
+            m.addSeparator()
+            head = m.addAction(f"上次回答（{len(self._answers)} 个模型）")
+            head.setEnabled(False)
+            for label, text in self._answers:
+                sub = m.addMenu(f"🧠  {label or '模型'}")
+                sub.setStyleSheet(self._styled_qss())
+                wa = QWidgetAction(sub)
+                wa.setDefaultWidget(self._answer_widget(text, label or "回答"))
+                sub.addAction(wa)
+                cp = sub.addAction("📋  复制该回答")
+                cp.triggered.connect(lambda _checked=False, t=text: self._copy_text(t))
 
         # 提问入口
         m.addSeparator()
@@ -276,9 +301,11 @@ class TrayManager(QObject):
 
         # 模型 / 对话
         m.addSeparator()
-        model_menu = m.addMenu("🧠  切换模型")
+        model_menu = MultiSelectMenu(m)
+        model_menu.setTitle("🧠  切换模型（可多选并行）")
         model_menu.setStyleSheet(self._styled_qss())
         self._build_model_submenu(model_menu)
+        m.addMenu(model_menu)
         m.addAction("➕  新对话").triggered.connect(self.new_conversation.emit)
 
         # 其余
@@ -286,6 +313,34 @@ class TrayManager(QObject):
         m.addAction("💬  打开对话窗").triggered.connect(self.open_chat.emit)
         m.addAction("⚙  设置").triggered.connect(self.open_settings.emit)
         m.addAction("⏻  退出").triggered.connect(self.exit_app.emit)
+
+    def _answer_widget(self, text: str, caption: str) -> QWidget:
+        """把一段回答放进「标题 + 限高滚动区」的小部件，供内嵌/子菜单复用。"""
+        ans = (text or "").strip()
+        disp = ans if len(ans) <= 4000 else ans[:4000] + "…"
+        box = QWidget()
+        box.setObjectName("menu_row")
+        box_l = QVBoxLayout(box)
+        box_l.setContentsMargins(10, 4, 10, 4)
+        box_l.setSpacing(4)
+        cap = QLabel(caption)
+        cap.setObjectName("menu_caption")
+        ans_lbl = QLabel(disp)
+        ans_lbl.setObjectName("menu_answer")
+        ans_lbl.setWordWrap(True)
+        ans_lbl.setMaximumWidth(340)
+        ans_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        box_l.addWidget(cap)
+        scroll = QScrollArea()
+        scroll.setObjectName("menu_answer_scroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setMinimumWidth(320)
+        scroll.setMaximumHeight(240)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(ans_lbl)
+        box_l.addWidget(scroll)
+        return box
 
     def _wrap_widget(self, menu: QMenu, widget: QWidget) -> QWidgetAction:
         wrap = QWidget()
@@ -299,8 +354,6 @@ class TrayManager(QObject):
         return action
 
     def _build_model_submenu(self, menu: QMenu):
-        group = QActionGroup(menu)
-        group.setExclusive(True)
         if not self._providers:
             act = menu.addAction("（尚未配置服务商）")
             act.setEnabled(False)
@@ -319,10 +372,9 @@ class TrayManager(QObject):
                     label = f"👁 {label}"
                 act = menu.addAction(label)
                 act.setCheckable(True)
-                act.setChecked(p.get("id") == self._active_pid and mid == self._active_mid)
-                group.addAction(act)
-                act.triggered.connect(
-                    lambda _checked, pid=p.get("id"), m_id=mid: self._pick_model(pid, m_id)
+                act.setChecked((p.get("id"), mid) in self._selected)   # 先设勾选再连信号
+                act.toggled.connect(
+                    lambda checked, pid=p.get("id"), m_id=mid, a=act: self._on_model_toggled(pid, m_id, checked, a)
                 )
 
     # ── 原生 Windows 菜单（Win32 TrackPopupMenu，无渲染、与系统一致）──────────────
@@ -373,8 +425,9 @@ class TrayManager(QObject):
         def item(menu, flags, cid, text):
             u.AppendMenuW(menu, flags, cid, text)
 
-        if self._last_answer.strip():
-            lines, more = self._answer_lines(self._last_answer, width=32, max_lines=8)
+        self._native_copy_map = {}
+        if len(self._answers) == 1 and not self._answers[0][0]:
+            lines, more = self._answer_lines(self._answers[0][1], width=32, max_lines=8)
             item(hmenu, MF_STRING | MF_GRAYED, 0, "上次回答")
             for ln in lines:
                 # 空行用一个空格占位，避免 AppendMenuW 把空串渲染异常
@@ -383,6 +436,24 @@ class TrayManager(QObject):
                 item(hmenu, MF_STRING | MF_GRAYED, 0, "  …（完整内容点下方「复制上次回答」）")
             item(hmenu, MF_STRING, self._CMD["copy_answer"], "复制上次回答")
             item(hmenu, MF_SEPARATOR, 0, None)
+        elif self._answers:
+            # 多模型：每个模型的回答各做一个子菜单项
+            # 复制命令 ID 用 100000+，与模型项 ID（100+）留足间隔，杜绝碰撞
+            item(hmenu, MF_STRING | MF_GRAYED, 0, f"上次回答（{len(self._answers)} 个模型）")
+            copy_cid = 100000
+            for label, text in self._answers:
+                ans_sub = u.CreatePopupMenu()
+                lines, more = self._answer_lines(text, width=32, max_lines=10)
+                for ln in lines:
+                    u.AppendMenuW(ans_sub, MF_STRING | MF_GRAYED, 0, "  " + (ln if ln else " "))
+                if more:
+                    u.AppendMenuW(ans_sub, MF_STRING | MF_GRAYED, 0, "  …（完整内容点「复制该回答」）")
+                u.AppendMenuW(ans_sub, MF_SEPARATOR, 0, None)
+                self._native_copy_map[copy_cid] = text
+                u.AppendMenuW(ans_sub, MF_STRING, copy_cid, "复制该回答")
+                copy_cid += 1
+                u.AppendMenuW(hmenu, MF_POPUP, ans_sub, label or "模型")
+            item(hmenu, MF_SEPARATOR, 0, None)
 
         item(hmenu, MF_STRING, self._CMD["screenshot_region"], "截图提问")
         item(hmenu, MF_STRING, self._CMD["screenshot_full"], "截全图提问")
@@ -390,7 +461,7 @@ class TrayManager(QObject):
         item(hmenu, MF_SEPARATOR, 0, None)
 
         submenu = self._build_native_model_submenu(u)
-        u.AppendMenuW(hmenu, MF_POPUP, submenu, "切换模型")
+        u.AppendMenuW(hmenu, MF_POPUP, submenu, "切换模型（可多选）")
         item(hmenu, MF_STRING, self._CMD["new_conversation"], "新对话")
         item(hmenu, MF_SEPARATOR, 0, None)
 
@@ -430,7 +501,7 @@ class TrayManager(QObject):
                 if mdl.get("vision"):
                     label = f"{label}（视觉）"
                 flags = MF_STRING
-                if p.get("id") == self._active_pid and mid == self._active_mid:
+                if (p.get("id"), mid) in self._selected:
                     flags |= MF_CHECKED
                 self._native_model_map[cid] = (p.get("id"), mid)
                 u.AppendMenuW(sub, flags, cid, label)
@@ -453,9 +524,12 @@ class TrayManager(QObject):
         if cmd in handlers:
             handlers[cmd]()
             return
+        if cmd in self._native_copy_map:
+            self._copy_text(self._native_copy_map[cmd])
+            return
         pick = self._native_model_map.get(cmd)
         if pick:
-            self._pick_model(*pick)
+            self._toggle_model(*pick)
 
     @staticmethod
     def _answer_lines(text: str, width: int = 32, max_lines: int = 8):

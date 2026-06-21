@@ -26,7 +26,7 @@ class CommandHandler(QObject):
 /settings — 打开设置
 /help — 显示本帮助
 
-· 顶部模型名可随时切换服务商 / 模型
+· 顶部模型名可随时切换服务商 / 模型；勾选多个即并行向多个模型提问
 · 选择带 👁 的视觉模型即可直接发送截图与图片"""
 
     def handle(self, text: str):

@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QMenu,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, QPoint, QTimer, QSize
-from PyQt6.QtGui import QFont, QKeyEvent, QPixmap, QActionGroup, QPainter
+from PyQt6.QtGui import QFont, QKeyEvent, QPixmap, QPainter
 
 from .theme import hex_to_rgb_str
 
@@ -25,12 +25,20 @@ def set_toolwindow(hwnd: int):
 
 
 class MessageBubble(QFrame):
-    def __init__(self, text: str, is_user: bool, parent=None, image_data: bytes = None):
+    def __init__(self, text: str, is_user: bool, parent=None, image_data: bytes = None,
+                 model_label: str = ""):
         super().__init__(parent)
         self.setObjectName("user_bubble" if is_user else "ai_bubble")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 8, 12, 6)
         layout.setSpacing(6)
+
+        # 多模型并行时，每条 AI 气泡顶部标注是哪个模型的回答（单模型时不显示）。
+        if model_label:
+            tag = QLabel(model_label)
+            tag.setObjectName("model_tag")
+            tag.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
+            layout.addWidget(tag)
 
         if image_data:
             pixmap = QPixmap()
@@ -89,6 +97,18 @@ class MessageBubble(QFrame):
             parts.append(f"{tokens_out} out")
         self._stats_label.setText("  ·  ".join(parts))
         self._stats_label.setVisible(True)
+
+
+class MultiSelectMenu(QMenu):
+    """点击「可勾选」项时保持菜单打开，以便一次连续勾选多个模型；
+    点击普通项（如「管理服务商」）才照常关闭。"""
+
+    def mouseReleaseEvent(self, event):
+        action = self.activeAction()
+        if action is not None and action.isCheckable() and action.isEnabled():
+            action.trigger()   # 切换勾选并触发 toggled，但不关闭菜单
+            return
+        super().mouseReleaseEvent(event)
 
 
 class ChatInputEdit(QLineEdit):
@@ -204,7 +224,7 @@ class ChatWindow(QWidget):
     close_requested = pyqtSignal()
     open_settings_requested = pyqtSignal()
     conversation_selected = pyqtSignal(str)
-    model_changed = pyqtSignal(str, str)          # provider_id, model_id
+    models_changed = pyqtSignal(list)             # 选中集合: [(provider_id, model_id), ...]，首项为主模型
     manage_providers_requested = pyqtSignal()
 
     def __init__(self, width=440, height=560, opacity=0.9, position="bottom_right",
@@ -225,6 +245,7 @@ class ChatWindow(QWidget):
         self._providers: list[dict] = []
         self._active_pid: str = ""
         self._active_mid: str = ""
+        self._selected: list[tuple] = []   # 选中的 (pid, mid) 集合，首项为主模型
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -468,30 +489,46 @@ class ChatWindow(QWidget):
 
     # ── Model switcher ──────────────────────────────────────────────────────
 
-    def set_model_options(self, providers: list[dict], active_pid: str, active_mid: str):
-        """由 app 注入可选的服务商 / 模型及当前激活项，刷新顶部芯片。"""
+    def set_model_options(self, providers: list[dict], active_pid: str, active_mid: str,
+                          selected: list = None):
+        """由 app 注入可选的服务商 / 模型、当前主模型及选中集合，刷新顶部芯片。"""
         self._providers = providers or []
         self._active_pid = active_pid or ""
         self._active_mid = active_mid or ""
+        if selected:
+            self._selected = [tuple(s) for s in selected]
+        elif self._active_mid:
+            self._selected = [(self._active_pid, self._active_mid)]
+        else:
+            self._selected = []
         self._refresh_model_chip()
 
-    def _refresh_model_chip(self):
-        name, vision = "选择模型", False
+    def _model_display_name(self, pid: str, mid: str) -> tuple[str, bool]:
         for p in self._providers:
-            if p.get("id") == self._active_pid:
+            if p.get("id") == pid:
                 for m in p.get("models", []):
-                    if m.get("id") == self._active_mid:
-                        name = m.get("name") or m.get("id") or name
-                        vision = bool(m.get("vision"))
-                        break
-                break
+                    if m.get("id") == mid:
+                        return (m.get("name") or mid or "?"), bool(m.get("vision"))
+        return (mid or "?"), False
+
+    def _refresh_model_chip(self):
+        primary = self._selected[0] if self._selected else (self._active_pid, self._active_mid)
+        name, vision = self._model_display_name(primary[0], primary[1])
+        if not self._selected:
+            name = "选择模型"
         label = f"👁 {name}" if vision else name
+        extra = len(self._selected) - 1
+        if extra > 0:
+            label = f"{label}  ＋{extra}"
         self._model_btn.setText(f"{label}  ▾")
+        if len(self._selected) > 1:
+            names = "、".join(self._model_display_name(p, m)[0] for p, m in self._selected)
+            self._model_btn.setToolTip(f"并行 {len(self._selected)} 个模型：{names}\n（再次点击可勾选/取消）")
+        else:
+            self._model_btn.setToolTip("切换服务商 / 模型；勾选多个即并行提问")
 
     def _open_model_menu(self):
-        menu = self._styled_menu()
-        group = QActionGroup(menu)
-        group.setExclusive(True)
+        menu = self._styled_menu(multi=True)
 
         if not self._providers:
             act = menu.addAction("（尚未配置服务商）")
@@ -510,10 +547,9 @@ class ChatWindow(QWidget):
                     label = f"👁 {label}"
                 act = menu.addAction(label)
                 act.setCheckable(True)
-                act.setChecked(p.get("id") == self._active_pid and mid == self._active_mid)
-                group.addAction(act)
-                act.triggered.connect(
-                    lambda _checked, pid=p.get("id"), m_id=mid: self._on_model_picked(pid, m_id)
+                act.setChecked((p.get("id"), mid) in self._selected)   # 先设勾选再连信号，避免构建时误触发
+                act.toggled.connect(
+                    lambda checked, pid=p.get("id"), m_id=mid, a=act: self._toggle_model(pid, m_id, checked, a)
                 )
 
         menu.addSeparator()
@@ -522,12 +558,24 @@ class ChatWindow(QWidget):
 
         menu.exec(self._model_btn.mapToGlobal(self._model_btn.rect().bottomLeft()))
 
-    def _on_model_picked(self, pid: str, mid: str):
-        if pid == self._active_pid and mid == self._active_mid:
-            return
-        self._active_pid, self._active_mid = pid, mid
+    def _toggle_model(self, pid: str, mid: str, checked: bool, action):
+        key = (pid, mid)
+        sel = list(self._selected)
+        if checked:
+            if key not in sel:
+                sel.append(key)
+        else:
+            if key in sel:
+                if len(sel) == 1:
+                    # 至少保留一个模型：撤销本次取消，屏蔽信号避免 setChecked 再触发 toggled
+                    action.blockSignals(True)
+                    action.setChecked(True)
+                    action.blockSignals(False)
+                    return
+                sel.remove(key)
+        self._selected = sel
         self._refresh_model_chip()
-        self.model_changed.emit(pid, mid)
+        self.models_changed.emit([list(k) for k in sel])
 
     # ── More menu (commands) ──────────────────────────────────────────────────
 
@@ -554,8 +602,8 @@ class ChatWindow(QWidget):
             act.triggered.connect(lambda _checked, c=cmd: self.command_entered.emit(c))
         menu.exec(self._more_btn.mapToGlobal(self._more_btn.rect().bottomLeft()))
 
-    def _styled_menu(self) -> QMenu:
-        menu = QMenu(self)
+    def _styled_menu(self, multi: bool = False) -> QMenu:
+        menu = MultiSelectMenu(self) if multi else QMenu(self)
         argb = hex_to_rgb_str(self._accent)
         if self._theme == "dark":
             css = """
@@ -594,8 +642,8 @@ class ChatWindow(QWidget):
         self._bubbles.append(bubble)
         self._scroll_to_bottom()
 
-    def start_ai_message(self) -> MessageBubble:
-        bubble = MessageBubble("", is_user=False)
+    def start_ai_message(self, model_label: str = "") -> MessageBubble:
+        bubble = MessageBubble("", is_user=False, model_label=model_label)
         bubble.start_timer()
         self._message_layout.insertWidget(self._message_layout.count() - 1, bubble)
         self._bubbles.append(bubble)
@@ -638,6 +686,10 @@ class ChatWindow(QWidget):
                 widget.deleteLater()
         self._bubbles.clear()
         self._current_ai_bubble = None
+
+    def scroll_to_bottom(self):
+        """对外：多模型并行流式时由 app 调用。"""
+        self._scroll_to_bottom()
 
     def _scroll_to_bottom(self):
         QTimer.singleShot(50, lambda: self._scroll_area.verticalScrollBar().setValue(
@@ -747,6 +799,7 @@ class ChatWindow(QWidget):
                     border-radius: 12px; margin-right: 56px;
                 }
                 #ai_bubble QLabel { color: #ececec; }
+                #ai_bubble #model_tag { color: rgba(59,130,246,235); font-size: 10px; }
                 #ai_bubble #stats_label { color: rgba(200,200,200,120); font-size: 10px; font-family: 'Consolas'; }
                 #convs_panel { }
                 #convs_scroll { border: none; }
@@ -841,6 +894,7 @@ class ChatWindow(QWidget):
                     border-radius: 12px; margin-right: 56px;
                 }
                 #ai_bubble QLabel { color: #2b2b2b; }
+                #ai_bubble #model_tag { color: rgba(59,130,246,255); font-size: 10px; }
                 #ai_bubble #stats_label { color: rgba(0,0,0,100); font-size: 10px; font-family: 'Consolas'; }
                 #convs_panel { }
                 #convs_scroll { border: none; }

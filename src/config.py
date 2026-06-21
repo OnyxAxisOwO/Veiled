@@ -102,6 +102,11 @@ DEFAULT_PROVIDERS = [
 DEFAULT_CONFIG = {
     "api": {
         "active": {"provider": "openai", "model": "gpt-4o"},
+        # 并行多模型：用户可一次性勾选多个模型，请求会同时广播给全部。
+        # 第一个为「主模型」，与 api.active 保持同步（也是单模型时的唯一项）。
+        "active_models": [{"provider": "openai", "model": "gpt-4o"}],
+        # 多模型回答后追问的上下文衔接方式：primary = 只用主模型回答续接；all = 把所有回答合并写进历史。
+        "multi_history_mode": "primary",
         "providers": copy.deepcopy(DEFAULT_PROVIDERS),
         "proxy": "",
         # 可选的「视觉识别中继」：主模型不支持图片时，先用这里指定的视觉模型把
@@ -184,6 +189,7 @@ class Config:
         if not self._config_path.exists():
             self.save()
             return
+        loaded = None
         try:
             encrypted = self._config_path.read_bytes()
             decrypted = dpapi_decrypt(encrypted)
@@ -191,11 +197,21 @@ class Config:
             self._deep_merge(self._data, loaded)
         except Exception:
             pass
+        # 旧版本配置没有 active_models：不要让 DEFAULT 里注入的 [{openai,gpt-4o}] 顶替用户的真实
+        # 主模型——删掉它，迁移时再由 api.active 推导，避免升级后模型被悄悄重置。
+        self._drop_injected_active_models(loaded)
         try:
             self._migrate()
         except Exception:
             # 迁移失败时退回默认 API 配置，保证程序仍能启动
             self._data["api"] = copy.deepcopy(DEFAULT_CONFIG["api"])
+
+    def _drop_injected_active_models(self, loaded):
+        """若来源配置本身不含 api.active_models，则丢弃合并进来的默认值，让其由 api.active 推导。"""
+        if isinstance(loaded, dict) and "active_models" not in (loaded.get("api") or {}):
+            api = self._data.get("api")
+            if isinstance(api, dict):
+                api.pop("active_models", None)
 
     def save(self):
         raw = json.dumps(self._data, ensure_ascii=False, indent=2).encode("utf-8")
@@ -215,6 +231,7 @@ class Config:
         merged = copy.deepcopy(DEFAULT_CONFIG)
         self._deep_merge(merged, loaded)
         self._data = merged
+        self._drop_injected_active_models(loaded)
         try:
             self._migrate()
         except Exception:
@@ -274,6 +291,75 @@ class Config:
         self.set("api.active.provider", provider_id)
         self.set("api.active.model", model_id)
 
+    # ── 并行多模型 ────────────────────────────────────────────────────────────
+
+    def _model_exists(self, provider_id: str, model_id: str) -> bool:
+        if not provider_id or not model_id:
+            return False
+        prov = self.get_provider(provider_id)
+        if not prov:
+            return False
+        return any(m.get("id") == model_id for m in prov.get("models", []))
+
+    def active_models(self) -> list[dict]:
+        """当前选中的全部模型（去重、且都真实存在）。列表首项为主模型。
+
+        若 api.active_models 缺失/失效，则回退为「单一 api.active」一项，
+        从而让所有旧的单模型代码路径无缝继续工作。"""
+        out, seen = [], set()
+        raw = self.get("api.active_models", None)
+        if isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                pid, mid = item.get("provider", ""), item.get("model", "")
+                key = (pid, mid)
+                if key not in seen and self._model_exists(pid, mid):
+                    out.append({"provider": pid, "model": mid})
+                    seen.add(key)
+        if out:
+            return out
+        apid, amid = self.get("api.active.provider", ""), self.get("api.active.model", "")
+        if self._model_exists(apid, amid):
+            return [{"provider": apid, "model": amid}]
+        prov, m = self.active_provider(), self.active_model()
+        if prov and m and m.get("id"):
+            return [{"provider": prov.get("id"), "model": m.get("id")}]
+        return []
+
+    def set_active_models(self, models: list[dict]):
+        """写入选中的模型集合；首项同步为单模型 api.active。空/全失效则忽略（保持当前）。"""
+        clean, seen = [], set()
+        for item in models or []:
+            if not isinstance(item, dict):
+                continue
+            pid, mid = item.get("provider", ""), item.get("model", "")
+            key = (pid, mid)
+            if key not in seen and self._model_exists(pid, mid):
+                clean.append({"provider": pid, "model": mid})
+                seen.add(key)
+        if not clean:
+            return
+        self.set("api.active_models", clean)
+        self.set("api.active.provider", clean[0]["provider"])
+        self.set("api.active.model", clean[0]["model"])
+
+    def set_primary_model(self, provider_id: str, model_id: str):
+        """设置主模型（也用于设置面板「设为默认模型」保存时）：
+        若该模型已在并行选中集合内，则提到首位、保留其余并行项；
+        若不在集合内，则视为切回单一模型。同时裁剪掉已失效的并行项。"""
+        if not self._model_exists(provider_id, model_id):
+            # 主模型无效（如该服务商无任何模型）：仅做一次有效性裁剪
+            self._ensure_active_models_valid()
+            return
+        key = (provider_id, model_id)
+        sel = [(m["provider"], m["model"]) for m in self.active_models()]
+        if key in sel:
+            sel = [key] + [k for k in sel if k != key]
+        else:
+            sel = [key]
+        self.set_active_models([{"provider": p, "model": m} for p, m in sel])
+
     @property
     def provider(self) -> str:
         """当前激活服务商的 id（兼容旧调用）。"""
@@ -330,6 +416,7 @@ class Config:
             api.setdefault("active", {"provider": "", "model": ""})
             api.setdefault("proxy", "")
             api.setdefault("vision_relay", copy.deepcopy(DEFAULT_CONFIG["api"]["vision_relay"]))
+            api.setdefault("multi_history_mode", "primary")
             for p in provs:
                 p.setdefault("id", new_provider_id())
                 p.setdefault("name", p.get("id", "服务商"))
@@ -340,6 +427,7 @@ class Config:
                 p.setdefault("models", [])
             self._ensure_active_valid()
             self._ensure_vision_relay_valid()
+            self._ensure_active_models_valid()
             return
 
         if not isinstance(provs, dict):
@@ -400,10 +488,13 @@ class Config:
 
         self._data["api"] = {
             "active": {"provider": active_provider_id, "model": active_model_id},
+            "active_models": [{"provider": active_provider_id, "model": active_model_id}],
+            "multi_history_mode": api.get("multi_history_mode", "primary"),
             "providers": new_list,
             "proxy": api.get("proxy", ""),
             "vision_relay": relay,
         }
+        self._ensure_active_models_valid()
 
     def _ensure_active_valid(self):
         """保证 api.active 指向真实存在的服务商/模型，否则回退到第一个。"""
@@ -418,6 +509,15 @@ class Config:
         mid = self.get("api.active.model", "")
         if models and not any(m.get("id") == mid for m in models):
             self.set("api.active.model", models[0]["id"])
+
+    def _ensure_active_models_valid(self):
+        """保证 api.active_models 是一组真实存在、去重的 (provider, model)，
+        且首项与 api.active 同步。缺失时由单一 active 推导。"""
+        models = self.active_models()   # 已做存在性校验与回退
+        self.set("api.active_models", models)
+        if models:
+            self.set("api.active.provider", models[0]["provider"])
+            self.set("api.active.model", models[0]["model"])
 
     def _ensure_vision_relay_valid(self):
         """若视觉中继指向的服务商/模型已不存在，则停用并清空指针，避免悬空引用。"""

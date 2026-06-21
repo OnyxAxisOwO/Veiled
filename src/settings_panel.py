@@ -330,6 +330,18 @@ class SettingsPanel(QWidget):
         proxy_row.addWidget(self._p_proxy, 1)
         right.addLayout(proxy_row)
 
+        # 多模型并行：在模型菜单勾选多个模型即并行提问；此处决定追问时的上下文衔接
+        mh_row = QHBoxLayout()
+        mh_row.addWidget(QLabel("多模型追问续接:"))
+        self._s_multi_history = QComboBox()
+        self._s_multi_history.addItems(["主模型续接", "全部写进历史"])
+        self._s_multi_history.setToolTip(
+            "勾选多个模型并行回答后，继续追问时如何衔接上下文：\n"
+            "· 主模型续接：只用第一个（主）模型的回答进入历史\n"
+            "· 全部写进历史：把所有模型的回答合并写进历史")
+        mh_row.addWidget(self._s_multi_history, 1)
+        right.addLayout(mh_row)
+
         cols.addLayout(right, 1)
         layout.addLayout(cols, 1)
         return self._scrollable(inner)
@@ -900,7 +912,7 @@ class SettingsPanel(QWidget):
         layout.setContentsMargins(18, 16, 18, 16)
         layout.addStretch()
         layout.addWidget(QLabel("Windows Display Adapter Helper"))
-        layout.addWidget(QLabel("版本 1.9.3"))
+        layout.addWidget(QLabel("版本 1.10.0"))
         layout.addStretch()
         return inner
 
@@ -917,6 +929,7 @@ class SettingsPanel(QWidget):
         self._cur_model_index = -1
         self._reload_provider_list(select=self._active_index())
         self._p_proxy.setText(c.get("api.proxy", ""))
+        self._s_multi_history.setCurrentIndex(0 if c.get("api.multi_history_mode", "primary") == "primary" else 1)
 
         # 视觉中继
         self._v_enabled.setChecked(c.get("api.vision_relay.enabled", False))
@@ -1005,6 +1018,9 @@ class SettingsPanel(QWidget):
         c.set("api.active.provider", self._active_pid)
         c.set("api.active.model", self._active_mid)
         c.set("api.proxy", self._p_proxy.text().strip())
+        c.set("api.multi_history_mode", "primary" if self._s_multi_history.currentIndex() == 0 else "all")
+        # 服务商/模型可能已增删改名：把「设为默认模型」作为主模型，保留仍有效的并行选中项
+        c.set_primary_model(self._active_pid, self._active_mid)
 
         # 视觉中继：校验用户选中的目标是否仍存在于编辑后的服务商工作副本里。
         # 若其服务商/模型已被删除或改名，则停用并清空，绝不静默改指向其它服务商。

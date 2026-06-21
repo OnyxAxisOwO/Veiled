@@ -109,6 +109,31 @@ class VisionPipelineWorker(QThread):
             self.error.emit(str(e))
 
 
+class ImageDescribeWorker(QThread):
+    """单阶段：把一张图片交给视觉模型识别成文字。
+
+    多模型并行时，用它把截图「识别一次」，再把同一段文字分发给所有不支持图片的
+    模型，避免每个模型各跑一遍 VLM。"""
+    done = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, vlm_client: "ApiClient", image_bytes: bytes, prompt: str):
+        super().__init__()
+        self._vlm = vlm_client
+        self._image = image_bytes
+        self._prompt = prompt
+
+    def run(self):
+        try:
+            desc = self._vlm.describe_image(self._image, self._prompt)
+            if not desc.strip():
+                self.error.emit("视觉模型未返回任何识别结果")
+                return
+            self.done.emit(desc)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class ApiClient:
     """单个模型的 HTTP 客户端。
 

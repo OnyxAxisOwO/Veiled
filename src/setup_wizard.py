@@ -311,6 +311,8 @@ class SetupWizard(QWidget):
         }
         self._config.set("api.providers", [provider])
         self._config.set("api.active", {"provider": pid, "model": model_id})
+        # 同步并行选中集合，避免残留 DEFAULT 里指向已不存在服务商的 active_models
+        self._config._ensure_active_models_valid()
         self._config.set("api.proxy", self._proxy_input.text().strip())
 
         for name, widget in self._hotkey_inputs.items():

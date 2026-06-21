@@ -5,7 +5,9 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSlot
 
 from .config import Config
 from .database import Database
-from .api_client import ApiClient, ApiWorker, VisionPipelineWorker, embed_description
+from .api_client import (
+    ApiClient, ApiWorker, VisionPipelineWorker, ImageDescribeWorker, embed_description,
+)
 from .hotkey import HotkeyManager
 from .chat_window import ChatWindow
 from .screenshot import ScreenshotOverlay
@@ -35,7 +37,17 @@ class VeiledApp(QObject):
 
         self._current_conv_id: str | None = None
         self._messages: list[dict] = []
-        self._last_answer: str = ""   # 供托盘菜单「上次回答」展示
+        self._last_answer: str = ""   # 主模型回答（单模型 / 兼容用）
+        self._last_answers: list[tuple] = []   # [(模型名, 回答), ...]，供托盘菜单分模型展示
+
+        # 并行多模型批处理状态
+        self._batch: list[dict] = []
+        self._batch_notify: bool = False
+        self._batch_shared_desc: str = ""
+        self._batch_pending: tuple | None = None
+        self._vlm_worker: ImageDescribeWorker | None = None
+        # 每次发起新请求 / 切换对话都自增；批处理回调据此丢弃过期批次，避免覆盖新状态
+        self._batch_gen: int = 0
 
         self._hotkey_mgr = HotkeyManager()
         self._hotkey_mgr.triggered.connect(self._on_hotkey)
@@ -70,7 +82,7 @@ class VeiledApp(QObject):
         self._tray.screenshot_full.connect(self._screenshot_full)
         self._tray.clipboard_ask.connect(self._clipboard_ask)
         self._tray.new_conversation.connect(self._new_conversation)
-        self._tray.model_changed.connect(self._on_model_changed)
+        self._tray.models_changed.connect(self._on_models_changed)
 
     def start(self):
         if self._config.get("first_run", True):
@@ -95,7 +107,7 @@ class VeiledApp(QObject):
         self._tray.set_menu_style(self._config.get("display.menu_style", "native"))
         self._tray.set_accent(self._config.get("display.accent_color", "#3b82f6"))
         self._tray.set_model_options(*self._model_options())
-        self._tray.set_last_answer(self._last_answer)
+        self._tray.set_last_answers(self._last_answers)
         self._tray.show()
         self._notification.set_tray(self._tray.tray_icon())
 
@@ -183,11 +195,10 @@ class VeiledApp(QObject):
         self._chat_window.close_requested.connect(self._hide_chat)
         self._chat_window.open_settings_requested.connect(self._show_settings)
         self._chat_window.conversation_selected.connect(self._on_conversation_selected)
-        self._chat_window.model_changed.connect(self._on_model_changed)
+        self._chat_window.models_changed.connect(self._on_models_changed)
         self._chat_window.manage_providers_requested.connect(self._open_providers_settings)
 
-        provs, active_pid, active_mid = self._model_options()
-        self._chat_window.set_model_options(provs, active_pid, active_mid)
+        self._chat_window.set_model_options(*self._model_options())
         bg_path = c.get("display.bg_image_path", "")
         bg_mode = c.get("display.bg_fill_mode", "fill")
         if bg_path:
@@ -314,7 +325,7 @@ class VeiledApp(QObject):
         if self._chat_window:
             self._chat_window.add_user_message(text)
         prompt = self._config.get("prompts.chat", "")
-        self._send_to_ai_stream(prompt)
+        self._dispatch(prompt, notify=False, has_image=False)
 
     def _on_menu_question(self, text: str):
         """托盘菜单输入框提交的问题：走「无窗口」问答，答案经通知 + 菜单「上次回答」呈现。"""
@@ -332,7 +343,7 @@ class VeiledApp(QObject):
         if self._chat_window:
             self._chat_window.add_user_message(text)
         prompt = self._config.get("prompts.chat", "")
-        self._send_to_ai_stream(prompt, notify=True)
+        self._dispatch(prompt, notify=True, has_image=False)
 
     def _on_command(self, text: str):
         self._commands.handle(text)
@@ -384,11 +395,7 @@ class VeiledApp(QObject):
         if self._chat_window:
             self._chat_window.add_user_message(content, image_data)
 
-        if image_data and self._vision_relay_enabled():
-            # 开了中继：截图一律先经视觉模型转文字，再交主模型回答（主模型可不支持图片）
-            self._send_image_pipeline(system_prompt, notify=notify)
-        else:
-            self._send_to_ai_stream(system_prompt, notify=notify)
+        self._dispatch(system_prompt, notify=notify, has_image=bool(image_data))
 
     def _send_to_ai_stream(self, system_prompt: str, notify: bool = False):
         client = self._build_client()
@@ -430,6 +437,239 @@ class VeiledApp(QObject):
                 m.pop("image", None)
                 break
 
+    # ── 单模型 / 多模型分发 ──────────────────────────────────────────────────
+
+    def _dispatch(self, system_prompt: str, notify: bool = False, has_image: bool = False):
+        """根据当前选中模型数量，走单模型（原有路径）或并行多模型（新路径）。"""
+        self._batch_gen += 1   # 任一新请求开始，作废仍在途的旧批次
+        models = self._config.active_models()
+        if len(models) >= 2:
+            self._start_batch(models, system_prompt, notify, self._batch_gen)
+            return
+        if has_image and self._vision_relay_enabled():
+            self._send_image_pipeline(system_prompt, notify=notify)
+        else:
+            self._send_to_ai_stream(system_prompt, notify=notify)
+
+    # ── 并行多模型 ────────────────────────────────────────────────────────────
+
+    def _start_batch(self, models: list, system_prompt: str, notify: bool, gen: int):
+        self._batch = []
+        self._batch_notify = notify
+        self._batch_shared_desc = ""
+        image = self._last_image()
+        needs_relay = image is not None and any(not self._model_supports_vision(m) for m in models)
+        if needs_relay and self._vision_relay_enabled():
+            # 截图只识别一次，识别文本再分发给所有不支持图片的模型
+            self._batch_pending = (models, system_prompt)
+            if self._chat_window and self._chat_window.isVisible():
+                self._chat_window.add_system_message("正在识别图片…")
+            self._start_shared_vlm(image, gen)
+        else:
+            self._launch_batch(models, system_prompt, "", gen)
+
+    def _start_shared_vlm(self, image: bytes, gen: int):
+        vlm = self._build_vlm_client()
+        prompt = self._config.get("api.vision_relay.prompt", "")
+        self._vlm_worker = ImageDescribeWorker(vlm, image, prompt)
+        self._vlm_worker.done.connect(lambda desc, g=gen: self._on_shared_vlm_done(desc, g))
+        self._vlm_worker.error.connect(lambda err, g=gen: self._on_shared_vlm_error(err, g))
+        self._vlm_worker.start()
+
+    def _on_shared_vlm_done(self, desc: str, gen: int):
+        if gen != self._batch_gen:
+            return
+        self._vlm_worker = None
+        if not self._batch_pending:
+            return
+        models, system_prompt = self._batch_pending
+        self._batch_pending = None
+        self._launch_batch(models, system_prompt, desc, gen)
+
+    def _on_shared_vlm_error(self, err: str, gen: int):
+        if gen != self._batch_gen:
+            return
+        self._vlm_worker = None
+        self._batch_pending = None
+        # 识别失败：回滚刚加入的用户消息，回到上一个干净状态
+        if self._messages and self._messages[-1]["role"] == "user":
+            self._messages.pop()
+            if self._current_conv_id:
+                self._db.delete_last_message(self._current_conv_id)
+        if self._chat_window:
+            self._chat_window.add_system_message(f"错误: {err}")
+        self._notification.show(f"错误: {err}")
+
+    def _launch_batch(self, models: list, system_prompt: str, shared_desc: str, gen: int):
+        self._batch_shared_desc = shared_desc or ""
+        self._batch = []
+        for i, mdef in enumerate(models):
+            pid, mid = mdef["provider"], mdef["model"]
+            label = self._model_label(pid, mid)
+            vision = self._model_supports_vision(mdef)
+            msgs = self._messages_for_model(vision, shared_desc)
+            client = self._build_client_for(pid, mid, vision)
+            worker = client.create_worker(msgs, system_prompt)
+            bubble = self._chat_window.start_ai_message(label) if self._chat_window else None
+            self._batch.append({
+                "label": label, "text": "", "bubble": bubble,
+                "done": False, "error": None, "worker": worker,
+            })
+            worker.chunk_received.connect(lambda t, i=i, g=gen: self._on_batch_chunk(i, t, g))
+            worker.finished.connect(lambda full, i=i, g=gen: self._on_batch_finished(i, full, g))
+            worker.stats_ready.connect(lambda e, a, b, i=i, g=gen: self._on_batch_stats(i, e, a, b, g))
+            worker.error.connect(lambda err, i=i, g=gen: self._on_batch_error(i, err, g))
+        for slot in self._batch:
+            slot["worker"].start()
+
+    def _on_batch_chunk(self, i: int, text: str, gen: int):
+        if gen != self._batch_gen:
+            return
+        if 0 <= i < len(self._batch):
+            slot = self._batch[i]
+            slot["text"] += text
+            if slot["bubble"]:
+                slot["bubble"].append_text(text)
+                if i == 0 and self._chat_window:
+                    self._chat_window.scroll_to_bottom()
+
+    def _on_batch_finished(self, i: int, full: str, gen: int):
+        if gen != self._batch_gen:
+            return
+        if 0 <= i < len(self._batch):
+            self._batch[i]["text"] = full
+
+    def _on_batch_stats(self, i: int, elapsed: float, tokens_in: int, tokens_out: int, gen: int):
+        if gen != self._batch_gen:
+            return
+        if 0 <= i < len(self._batch):
+            slot = self._batch[i]
+            if slot["bubble"]:
+                slot["bubble"].set_stats(elapsed, tokens_in, tokens_out)
+            slot["done"] = True
+            self._maybe_finalize_batch(gen)
+
+    def _on_batch_error(self, i: int, err: str, gen: int):
+        if gen != self._batch_gen:
+            return
+        if 0 <= i < len(self._batch):
+            slot = self._batch[i]
+            slot["error"] = err
+            slot["done"] = True
+            if slot["bubble"]:
+                slot["bubble"].append_text(f"\n[错误] {err}")
+                slot["bubble"].set_stats()
+            self._maybe_finalize_batch(gen)
+
+    def _maybe_finalize_batch(self, gen: int):
+        if gen == self._batch_gen and self._batch and all(s["done"] for s in self._batch):
+            self._finalize_batch()
+
+    def _finalize_batch(self):
+        batch = self._batch
+        self._batch = []
+        successes = [(s["label"], s["text"]) for s in batch if not s["error"] and s["text"].strip()]
+        had_error = any(s["error"] for s in batch)
+
+        # 若做过共享视觉识别，把识别文本固化进历史并丢掉图片字节，供后续追问
+        if self._batch_shared_desc:
+            for m in reversed(self._messages):
+                if m.get("image"):
+                    m["content"] = embed_description(m.get("content", ""), self._batch_shared_desc)
+                    m.pop("image", None)
+                    break
+        self._batch_shared_desc = ""
+
+        if successes:
+            mode = self._config.get("api.multi_history_mode", "primary")
+            if mode == "all":
+                combined = "\n\n".join(f"【{lbl}】\n{txt}" for lbl, txt in successes)
+                self._append_assistant(combined)
+            else:
+                primary = batch[0]
+                text = primary["text"] if (not primary["error"] and primary["text"].strip()) else successes[0][1]
+                self._append_assistant(text)
+        elif had_error:
+            # 确有失败且无任何成功：回滚用户消息，回到上一个干净状态
+            if self._messages and self._messages[-1]["role"] == "user":
+                self._messages.pop()
+                if self._current_conv_id:
+                    self._db.delete_last_message(self._current_conv_id)
+        else:
+            # 全部返回空但都没报错：保留用户消息（与单模型一致），落一条空回复占位
+            self._append_assistant("")
+
+        self._last_answers = successes
+        self._last_answer = successes[0][1] if successes else ""
+        self._tray.set_last_answers(self._last_answers)
+
+        if self._batch_notify and (not self._chat_window or not self._chat_window.isVisible()):
+            n = len(successes)
+            if n >= 2:
+                self._notification.show(f"{n} 个模型已回答，右键托盘图标查看")
+            elif n == 1:
+                self._notification.show(successes[0][1])
+            elif had_error:
+                err = next((s["error"] for s in batch if s["error"]), "请求失败")
+                self._notification.show(f"错误: {err}")
+            else:
+                self._notification.show("模型未返回内容")
+
+    def _append_assistant(self, text: str):
+        self._messages.append({"role": "assistant", "content": text})
+        if self._current_conv_id:
+            self._db.add_message(self._current_conv_id, "assistant", text)
+
+    # ── 多模型辅助 ────────────────────────────────────────────────────────────
+
+    def _last_image(self) -> bytes | None:
+        for m in reversed(self._messages):
+            if m.get("image"):
+                return m["image"]
+        return None
+
+    def _model_supports_vision(self, mdef: dict) -> bool:
+        prov = self._config.get_provider(mdef.get("provider", ""))
+        if not prov:
+            return False
+        for m in prov.get("models", []):
+            if m.get("id") == mdef.get("model"):
+                return bool(m.get("vision"))
+        return False
+
+    def _model_label(self, pid: str, mid: str) -> str:
+        prov = self._config.get_provider(pid)
+        if prov:
+            for m in prov.get("models", []):
+                if m.get("id") == mid:
+                    return m.get("name") or mid
+        return mid or "模型"
+
+    def _messages_for_model(self, supports_vision: bool, shared_desc: str) -> list:
+        """支持视觉的模型沿用带图片的历史；否则把图片替换成识别文本（或直接去掉）。"""
+        if supports_vision:
+            return list(self._messages)
+        out = []
+        for m in self._messages:
+            if m.get("image"):
+                out.append({"role": m["role"], "content": embed_description(m.get("content", ""), shared_desc)})
+            else:
+                out.append({"role": m["role"], "content": m.get("content", "")})
+        return out
+
+    def _build_client_for(self, pid: str, mid: str, supports_vision: bool) -> ApiClient:
+        from .config import parse_extra_body
+        prov = self._config.get_provider(pid) or {}
+        return ApiClient(
+            kind=prov.get("kind", "openai"),
+            api_key=prov.get("api_key", ""),
+            model=mid,
+            endpoint=prov.get("endpoint", ""),
+            proxy=self._config.proxy,
+            extra_body=parse_extra_body(prov.get("extra_body", "")),
+            supports_vision=supports_vision,
+        )
+
     def _on_ai_chunk(self, text: str):
         if self._chat_window:
             self._chat_window.append_ai_text(text)
@@ -441,7 +681,8 @@ class VeiledApp(QObject):
         if self._current_conv_id:
             self._db.add_message(self._current_conv_id, "assistant", full_text)
         self._last_answer = full_text
-        self._tray.set_last_answer(full_text)
+        self._last_answers = [("", full_text)]
+        self._tray.set_last_answers(self._last_answers)
         if self._notify_on_finish and (not self._chat_window or not self._chat_window.isVisible()):
             self._notification.show(full_text)
 
@@ -484,8 +725,10 @@ class VeiledApp(QObject):
         return bool(prov and (prov.get("api_key", "") or "").strip() and model)
 
     def _can_capture(self) -> bool:
-        """当前模型能直接看图，或开了 VLM 中继，都允许截图。"""
-        return self._config.active_model_supports_vision() or self._vision_relay_enabled()
+        """选中的任一模型能直接看图，或开了 VLM 中继，都允许截图。"""
+        if self._vision_relay_enabled():
+            return True
+        return any(self._model_supports_vision(m) for m in self._config.active_models())
 
     def _build_vlm_client(self) -> ApiClient:
         from .config import parse_extra_body
@@ -502,7 +745,7 @@ class VeiledApp(QObject):
         )
 
     def _model_options(self):
-        """提供给对话窗模型切换芯片的数据。"""
+        """提供给对话窗 / 托盘菜单模型切换芯片的数据：(服务商列表, 主服务商, 主模型, 选中集合)。"""
         provs = []
         for p in self._config.providers():
             provs.append({
@@ -513,15 +756,21 @@ class VeiledApp(QObject):
                     for m in p.get("models", []) if m.get("id")
                 ],
             })
-        return provs, self._config.get("api.active.provider", ""), self._config.get("api.active.model", "")
+        selected = [(m["provider"], m["model"]) for m in self._config.active_models()]
+        return (provs, self._config.get("api.active.provider", ""),
+                self._config.get("api.active.model", ""), selected)
 
-    def _on_model_changed(self, provider_id: str, model_id: str):
-        self._config.set_active(provider_id, model_id)
+    def _on_models_changed(self, selected: list):
+        """对话窗 / 托盘任一处改动选中集合：写回配置并同步另一处显示。"""
+        models = [{"provider": p, "model": m} for p, m in (tuple(s) for s in selected) if p and m]
+        if not models:
+            return
+        self._config.set_active_models(models)
         self._config.save()
-        # 不论从对话窗还是托盘菜单切换，两边都同步当前模型显示
-        self._tray.set_active(provider_id, model_id)
+        opts = self._model_options()
+        self._tray.set_model_options(*opts)
         if self._chat_window:
-            self._chat_window.set_model_options(*self._model_options())
+            self._chat_window.set_model_options(*opts)
 
     def _open_providers_settings(self):
         self._show_settings()
@@ -580,6 +829,7 @@ class VeiledApp(QObject):
                     self._show_chat()
 
     def _new_conversation(self):
+        self._batch_gen += 1   # 作废仍在途的批次，避免其结果落到新对话
         self._current_conv_id = self._db.create_conversation(self._config.api_model)
         self._messages = []
         if self._chat_window:
@@ -598,6 +848,7 @@ class VeiledApp(QObject):
     def _on_conversation_selected(self, conv_id: str):
         if conv_id == self._current_conv_id:
             return
+        self._batch_gen += 1   # 作废仍在途的批次，避免其结果落到刚切换到的对话
         messages = self._db.get_messages(conv_id)
         self._current_conv_id = conv_id
         # 保留图片字节：既用于重新渲染图片气泡，也让重开的视觉对话在追问时仍带上原图
