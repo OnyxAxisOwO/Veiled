@@ -217,6 +217,16 @@ class VeiledApp(QObject):
             self._screenshot_overlay.hide()
         self._notification.hide()
 
+    def _on_silent_changed(self, is_silent: bool):
+        if self._config.get("environment.notify_on_silent", True):
+            if is_silent:
+                names = "、".join(self._env_monitor.detected_processes)
+                self._notification.show(f"⚠ 检测到监控软件（{names}），快捷键已屏蔽")
+            else:
+                self._notification.show("✅ 监控软件已退出，快捷键已恢复")
+        if self._settings_panel:
+            self._settings_panel.update_detected_processes(self._env_monitor.detected_processes)
+
     def _clipboard_ask(self):
         if self._env_monitor.is_silent:
             return
@@ -517,6 +527,7 @@ class VeiledApp(QObject):
             self._settings_panel = SettingsPanel(self._config)
             self._settings_panel.settings_changed.connect(self._on_settings_changed)
         self._settings_panel.show()
+        self._settings_panel.update_detected_processes(self._env_monitor.detected_processes)
 
     def _on_settings_changed(self):
         self._notification.set_disguise(self._config.get("display.notification_disguise", "none"))

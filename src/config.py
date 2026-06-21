@@ -144,6 +144,7 @@ DEFAULT_CONFIG = {
     },
     "environment": {
         "monitor_enabled": True,
+        "notify_on_silent": True,
         "suspicious_processes": [
             "mstsc.exe", "TeamViewer.exe", "AnyDesk.exe",
             "obs64.exe", "obs32.exe", "bandicam.exe",

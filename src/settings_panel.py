@@ -806,10 +806,27 @@ class SettingsPanel(QWidget):
         self._s_close_on_focus = QCheckBox("点击窗口外部自动关闭对话窗")
         layout.addWidget(self._s_close_on_focus)
 
-        layout.addWidget(QLabel("环境检测进程列表（每行一个）:"))
+        self._s_monitor_enabled = QCheckBox("启用环境检测（检测到监控软件时屏蔽快捷键）")
+        layout.addWidget(self._s_monitor_enabled)
+
+        self._s_notify_on_silent = QCheckBox("检测到监控软件时发送通知")
+        layout.addWidget(self._s_notify_on_silent)
+
+        layout.addWidget(QLabel("监控进程列表（每行一个）:"))
         self._s_processes = QTextEdit()
         self._s_processes.setMaximumHeight(80)
         layout.addWidget(self._s_processes)
+
+        self._s_detected_info = QLabel("🟢 未检测到监控软件")
+        self._s_detected_info.setWordWrap(True)
+        layout.addWidget(self._s_detected_info)
+
+        def _on_monitor_toggled(enabled: bool):
+            self._s_notify_on_silent.setEnabled(enabled)
+            self._s_processes.setEnabled(enabled)
+            self._s_detected_info.setVisible(enabled)
+
+        self._s_monitor_enabled.toggled.connect(_on_monitor_toggled)
 
         layout.addWidget(QLabel("普通对话 System Prompt:"))
         self._s_prompt_chat = QTextEdit()
@@ -837,7 +854,7 @@ class SettingsPanel(QWidget):
         layout.setContentsMargins(18, 16, 18, 16)
         layout.addStretch()
         layout.addWidget(QLabel("Windows Display Adapter Helper"))
-        layout.addWidget(QLabel("版本 1.8.1"))
+        layout.addWidget(QLabel("版本 1.8.4"))
         layout.addStretch()
         return inner
 
@@ -886,7 +903,13 @@ class SettingsPanel(QWidget):
 
         self._s_autostart.setChecked(c.get("display.auto_start", True))
         self._s_close_on_focus.setChecked(c.get("display.close_on_focus_lost", False))
+        monitor_on = c.get("environment.monitor_enabled", True)
+        self._s_monitor_enabled.setChecked(monitor_on)
+        self._s_notify_on_silent.setChecked(c.get("environment.notify_on_silent", True))
+        self._s_notify_on_silent.setEnabled(monitor_on)
+        self._s_processes.setEnabled(monitor_on)
         self._s_processes.setText("\n".join(c.get("environment.suspicious_processes", [])))
+        self._s_detected_info.setVisible(monitor_on)
         self._s_prompt_chat.setText(c.get("prompts.chat", ""))
         self._s_prompt_screenshot.setText(c.get("prompts.screenshot", ""))
         self._s_screenshot_message.setText(c.get("prompts.screenshot_message", "请分析这张截图"))
@@ -978,6 +1001,8 @@ class SettingsPanel(QWidget):
 
         c.set("display.auto_start", self._s_autostart.isChecked())
         c.set("display.close_on_focus_lost", self._s_close_on_focus.isChecked())
+        c.set("environment.monitor_enabled", self._s_monitor_enabled.isChecked())
+        c.set("environment.notify_on_silent", self._s_notify_on_silent.isChecked())
         procs = [p.strip() for p in self._s_processes.toPlainText().split("\n") if p.strip()]
         c.set("environment.suspicious_processes", procs)
         c.set("prompts.chat", self._s_prompt_chat.toPlainText())
@@ -1050,6 +1075,21 @@ class SettingsPanel(QWidget):
                 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
         except Exception:
             pass
+
+    def update_detected_processes(self, processes: list[str]):
+        """Called by app when the env monitor detects or clears suspicious processes."""
+        if not processes:
+            self._s_detected_info.setText("🟢 未检测到监控软件")
+            self._s_detected_info.setStyleSheet("")
+        else:
+            names = "、".join(processes)
+            self._s_detected_info.setText(f"🔴 当前检测到：{names}")
+            self._s_detected_info.setStyleSheet("color: #e05c5c; font-weight: bold;")
+
+    def _on_disguise_changed(self, text: str):
+        visible = text == "自定义"
+        self._s_disguise_custom_label.setVisible(visible)
+        self._s_disguise_custom.setVisible(visible)
 
     def _browse_bg_image(self):
         self._set_topmost(False)
