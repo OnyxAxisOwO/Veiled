@@ -112,6 +112,11 @@ class Database:
         self._conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
         self._conn.commit()
 
+    def delete_all_conversations(self):
+        self._conn.execute("DELETE FROM messages")
+        self._conn.execute("DELETE FROM conversations")
+        self._conn.commit()
+
     def clear_conversation(self, conversation_id: str):
         self._conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
         self._conn.commit()

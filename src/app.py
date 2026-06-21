@@ -209,6 +209,8 @@ class VeiledApp(QObject):
         self._chat_window.close_requested.connect(self._hide_chat)
         self._chat_window.open_settings_requested.connect(self._show_settings)
         self._chat_window.conversation_selected.connect(self._on_conversation_selected)
+        self._chat_window.conversation_delete_requested.connect(self._on_history_delete)
+        self._chat_window.conversations_clear_all_requested.connect(self._on_history_clear_all)
         self._chat_window.models_changed.connect(self._on_models_changed)
         self._chat_window.manage_providers_requested.connect(self._open_providers_settings)
 
@@ -882,6 +884,41 @@ class VeiledApp(QObject):
         if self._chat_window:
             self._chat_window.show_conversations(convs, self._current_conv_id or "")
 
+    def _on_history_delete(self, conv_id: str):
+        self._db.delete_conversation(conv_id)
+        if conv_id == self._current_conv_id:
+            self._batch_gen += 1
+            self._current_conv_id = None
+            self._messages = []
+            if self._chat_window:
+                self._chat_window.clear_messages()
+        if self._chat_window:
+            self._chat_window.show_conversations(
+                self._db.list_conversations(), self._current_conv_id or ""
+            )
+
+    def _on_history_clear_all(self):
+        from PyQt6.QtWidgets import QMessageBox
+        box = QMessageBox(self._chat_window)
+        box.setWindowTitle("确认删除")
+        box.setText("将删除全部历史对话，此操作不可撤销。")
+        box.setInformativeText("确认继续？")
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.button(QMessageBox.StandardButton.Yes).setText("删除全部")
+        box.button(QMessageBox.StandardButton.No).setText("取消")
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+        self._db.delete_all_conversations()
+        self._batch_gen += 1
+        self._current_conv_id = None
+        self._messages = []
+        if self._chat_window:
+            self._chat_window.clear_messages()
+            self._chat_window.show_conversations([], "")
+
     def _on_conversation_selected(self, conv_id: str):
         if conv_id == self._current_conv_id:
             return
@@ -903,21 +940,25 @@ class VeiledApp(QObject):
                     self._chat_window.add_ai_message(msg["content"])
 
     def _clear_conversation(self):
-        if self._current_conv_id:
-            self._db.clear_conversation(self._current_conv_id)
-            self._messages = []
-            if self._chat_window:
-                self._chat_window.clear_messages()
-                self._chat_window.add_system_message("对话已清除")
+        if not self._current_conv_id:
+            self._surface_message("当前没有对话可以清空")
+            return
+        self._db.clear_conversation(self._current_conv_id)
+        self._messages = []
+        if self._chat_window:
+            self._chat_window.clear_messages()
+        self._surface_message("对话已清除")
 
     def _delete_conversation(self):
-        if self._current_conv_id:
-            self._db.delete_conversation(self._current_conv_id)
-            self._current_conv_id = None
-            self._messages = []
-            if self._chat_window:
-                self._chat_window.clear_messages()
-                self._chat_window.add_system_message("对话已删除")
+        if not self._current_conv_id:
+            self._surface_message("当前没有对话可以删除")
+            return
+        self._db.delete_conversation(self._current_conv_id)
+        self._current_conv_id = None
+        self._messages = []
+        if self._chat_window:
+            self._chat_window.clear_messages()
+        self._surface_message("对话已删除")
 
     def _switch_model(self):
         if not self._chat_window:

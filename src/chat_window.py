@@ -123,6 +123,7 @@ class ChatInputEdit(QLineEdit):
 
 class ConvItem(QFrame):
     clicked = pyqtSignal(str)
+    delete_requested = pyqtSignal(str)
 
     def __init__(self, conv_id: str, title: str, updated_at: float, active: bool = False):
         super().__init__()
@@ -130,7 +131,7 @@ class ConvItem(QFrame):
         self.setObjectName("conv_item_active" if active else "conv_item")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setContentsMargins(10, 8, 6, 8)
 
         title_label = QLabel(title or "(无标题)")
         title_label.setObjectName("conv_title")
@@ -143,8 +144,15 @@ class ConvItem(QFrame):
         date_label.setObjectName("conv_date")
         date_label.setFont(QFont("Microsoft YaHei", 9))
 
+        del_btn = QPushButton("×")
+        del_btn.setObjectName("conv_del_btn")
+        del_btn.setFixedSize(20, 20)
+        del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        del_btn.clicked.connect(lambda _=None: self.delete_requested.emit(self._conv_id))
+
         layout.addWidget(title_label, 1)
         layout.addWidget(date_label)
+        layout.addWidget(del_btn)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -224,6 +232,8 @@ class ChatWindow(QWidget):
     close_requested = pyqtSignal()
     open_settings_requested = pyqtSignal()
     conversation_selected = pyqtSignal(str)
+    conversation_delete_requested = pyqtSignal(str)
+    conversations_clear_all_requested = pyqtSignal()
     models_changed = pyqtSignal(list)             # 选中集合: [(provider_id, model_id), ...]，首项为主模型
     manage_providers_requested = pyqtSignal()
 
@@ -434,6 +444,10 @@ class ChatWindow(QWidget):
         back_btn.clicked.connect(self._show_chat_view)
         header.addWidget(back_btn)
         header.addStretch()
+        clear_all_btn = QPushButton("全部删除")
+        clear_all_btn.setObjectName("clear_all_btn")
+        clear_all_btn.clicked.connect(lambda: self.conversations_clear_all_requested.emit())
+        header.addWidget(clear_all_btn)
         new_btn = QPushButton("＋ 新对话")
         new_btn.setObjectName("new_conv_btn")
         new_btn.clicked.connect(lambda: (self.command_entered.emit("/new"), self._show_chat_view()))
@@ -479,6 +493,7 @@ class ChatWindow(QWidget):
                 active=(conv["id"] == current_id),
             )
             item.clicked.connect(self._on_conv_selected)
+            item.delete_requested.connect(self.conversation_delete_requested)
             self._convs_inner_layout.insertWidget(self._convs_inner_layout.count() - 1, item)
 
         self._stack.setCurrentIndex(1)
@@ -809,6 +824,12 @@ class ChatWindow(QWidget):
                     padding: 5px 12px; font-size: 11px; font-family: 'Microsoft YaHei';
                 }
                 #back_btn:hover, #new_conv_btn:hover { background: rgba(82,82,88,230); }
+                #clear_all_btn {
+                    background: rgba(60,60,64,190); color: #e88;
+                    border: 1px solid rgba(239,68,68,60); border-radius: 7px;
+                    padding: 5px 12px; font-size: 11px; font-family: 'Microsoft YaHei';
+                }
+                #clear_all_btn:hover { background: rgba(239,68,68,180); color: white; }
                 #panel_sep { background: rgba(255,255,255,15); max-height: 1px; }
                 #conv_item {
                     background: rgba(50,50,54,170);
@@ -822,6 +843,12 @@ class ChatWindow(QWidget):
                 }
                 #conv_title { color: #e3e3e3; }
                 #conv_date { color: #8a8a8a; }
+                #conv_del_btn {
+                    background: transparent; color: #666;
+                    border: none; border-radius: 4px;
+                    font-size: 14px; font-weight: bold; padding: 0;
+                }
+                #conv_del_btn:hover { background: rgba(239,68,68,200); color: white; }
                 #input_bar {
                     background-color: rgba(38, 38, 40, 250);
                     border-bottom-left-radius: 14px;
@@ -904,6 +931,12 @@ class ChatWindow(QWidget):
                     padding: 5px 12px; font-size: 11px; font-family: 'Microsoft YaHei';
                 }
                 #back_btn:hover, #new_conv_btn:hover { background: rgba(214,214,218,255); }
+                #clear_all_btn {
+                    background: rgba(232,232,234,210); color: #c44;
+                    border: 1px solid rgba(239,68,68,60); border-radius: 7px;
+                    padding: 5px 12px; font-size: 11px; font-family: 'Microsoft YaHei';
+                }
+                #clear_all_btn:hover { background: rgba(239,68,68,180); color: white; }
                 #panel_sep { background: rgba(0,0,0,12); max-height: 1px; }
                 #conv_item {
                     background: rgba(240,240,242,190);
@@ -917,6 +950,12 @@ class ChatWindow(QWidget):
                 }
                 #conv_title { color: #2b2b2b; }
                 #conv_date { color: #888; }
+                #conv_del_btn {
+                    background: transparent; color: #bbb;
+                    border: none; border-radius: 4px;
+                    font-size: 14px; font-weight: bold; padding: 0;
+                }
+                #conv_del_btn:hover { background: rgba(239,68,68,200); color: white; }
                 #input_bar {
                     background-color: rgba(246,246,248,250);
                     border-bottom-left-radius: 14px; border-bottom-right-radius: 14px;
