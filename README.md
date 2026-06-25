@@ -2,6 +2,8 @@
 
 隐身 AI 助手客户端，全程伪装为 Windows 系统显示驱动辅助工具。
 
+> 此仓库不再维护
+
 ## 下载
 
 从 [GitHub Actions](https://github.com/OnyxAxisOwO/Veiled/actions) 下载最新构建的 `DAHService.exe`，无需安装，直接运行。
